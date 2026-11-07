@@ -74,6 +74,16 @@ try {
     steps: 3,
   });
   await page.mouse.up();
+  assert.equal(
+    await page.evaluate(() => window.getSelection()?.toString()),
+    "",
+  );
+  assert.equal(
+    await page
+      .locator("#graph")
+      .evaluate((el) => getComputedStyle(el).userSelect),
+    "none",
+  );
   const grouped = await geometry();
   const dx = grouped.kitchen.x - nested.kitchen.x,
     dy = grouped.kitchen.y - nested.kitchen.y;

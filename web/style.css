@@ -264,6 +264,8 @@ h1 {
   height: 100%;
   display: block;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .canvas-hint {
   position: absolute;

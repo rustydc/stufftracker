@@ -322,6 +322,8 @@ function zoom(mult: number, x?: number, y?: number) {
 }
 let drag: { id: string | null; start: Point; origin: Point } | null = null;
 svg.addEventListener("pointerdown", (ev) => {
+  if (ev.button !== 0) return;
+  ev.preventDefault();
   const target = ev.target as Element;
   const foldTarget = target.closest("[data-fold]");
   if (foldTarget) {

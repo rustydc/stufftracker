@@ -92,8 +92,9 @@ bundles connections with identical visible endpoint/role sets and layer. Each
 bundle routes branches to a shared junction inside the endpoints’ common ancestor. Orthogonal paths use a rectilinear
 visibility grid and Dijkstra search with a bend penalty around card rectangles.
 Positions are parent-relative offsets, allocated once and retained for hidden
-entities. Rust computes nested container sizes and absolute frames, and clamps
-dragging to the parent’s content area. Moving a space translates all descendants
+entities. Rust computes nested container sizes and absolute frames. Dragging beyond a
+parent grows its bounds, recursively expanding ancestors; dragging left or up
+moves container origins while preserving sibling world positions. Moving a space translates all descendants
 without rewriting their offsets. Collapse retains expanded sibling slots so
 neighbors stay fixed. Routing follows the hierarchy one level at a time: each space treats its immediate
 child boxes as solid obstacles. A connection crosses each ancestor through a shared

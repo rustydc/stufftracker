@@ -1944,7 +1944,7 @@ pub fn move_entity(req: &MoveRequest) -> Result<View, String> {
         document: req.document.clone(),
         view: req.view.clone(),
     })?;
-    let node = layout
+    layout
         .nodes
         .iter()
         .find(|n| n.id == req.entity)
@@ -1962,19 +1962,43 @@ pub fn move_entity(req: &MoveRequest) -> Result<View, String> {
             .iter()
             .find(|n| &n.id == parent)
             .ok_or("Parent is hidden")?;
-        p.x = (p.x - parent.position.x).clamp(
-            PADDING,
-            (parent.width - node.expanded_width - PADDING).max(PADDING),
-        );
-        p.y = (p.y - parent.position.y).clamp(
-            CONTENT_Y,
-            (parent.height - node.expanded_height - PADDING).max(CONTENT_Y),
-        );
+        p.x -= parent.position.x;
+        p.y -= parent.position.y;
     }
     let mut view = req.view.clone();
     view.layout_version = 2;
     view.positions = layout.positions;
     view.positions.insert(req.entity.clone(), p);
+    // Grow toward the top/left by moving the container origin and compensating
+    // all its children. Existing siblings keep their world positions.
+    let mut child = req.entity.clone();
+    while let Some(parent) = req
+        .document
+        .entities
+        .iter()
+        .find(|e| e.id == child)
+        .and_then(|e| e.parent.clone())
+    {
+        let local = view.positions[&child];
+        let dx = (PADDING - local.x).max(0.);
+        let dy = (CONTENT_Y - local.y).max(0.);
+        if dx > 0. || dy > 0. {
+            for sibling in req
+                .document
+                .entities
+                .iter()
+                .filter(|e| e.parent.as_ref() == Some(&parent))
+            {
+                let pos = view.positions.get_mut(&sibling.id).unwrap();
+                pos.x += dx;
+                pos.y += dy;
+            }
+            let origin = view.positions.get_mut(&parent).unwrap();
+            origin.x -= dx;
+            origin.y -= dy;
+        }
+        child = parent;
+    }
     Ok(view)
 }
 #[wasm_bindgen]
@@ -3077,7 +3101,7 @@ mod tests {
         );
     }
     #[test]
-    fn moving_a_space_translates_its_subtree_and_clamps_to_parent() {
+    fn moving_a_space_translates_its_subtree_and_expands_parent() {
         let doc = sample();
         let first = layout(&LayoutRequest {
             document: doc.clone(),
@@ -3135,6 +3159,26 @@ mod tests {
                 y: CONTENT_Y
             }
         );
+        let expanded = layout(&LayoutRequest {
+            document: doc,
+            view: clamped,
+        })
+        .unwrap();
+        let lamp = expanded.nodes.iter().find(|n| n.id == "lamp").unwrap();
+        assert_eq!(lamp.position, Point { x: -999., y: -999. });
+        for node in &result.nodes {
+            if node.id == "sensor" || node.id == "tap" {
+                assert_eq!(
+                    expanded
+                        .nodes
+                        .iter()
+                        .find(|n| n.id == node.id)
+                        .unwrap()
+                        .position,
+                    node.position
+                );
+            }
+        }
     }
     #[test]
     fn flat_views_migrate_without_losing_fold_or_layer_choices() {
