@@ -151,6 +151,14 @@ try {
       data: { document: snapshot.document, view: activeView },
     })
   ).json();
+  assert.deepEqual(rendered.unrouted_connections, []);
+  for (const bundle of rendered.bundles)
+    for (const branch of bundle.branches) {
+      const n = rendered.nodes.find((n) => n.id === branch.entity);
+      const port = branch.points[0];
+      assert(port.x === n.position.x || port.x === n.position.x + n.width);
+      assert.equal(port.y, branch.points[1].y);
+    }
   const expectedPaths = rendered.bundles.flatMap((b) =>
     b.branches
       .filter((branch) => branch.points.length)

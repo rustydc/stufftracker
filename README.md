@@ -102,7 +102,21 @@ cannot become shortcuts, and branches cannot leave and re-enter an endpoint room
 Junctions are selected in nearby common-space corridors rather than at the far
 edge of the floor. Room-local branches share the same gateway. Independent connections reserve separate tracks with a 10-unit
 centerline gap (8 units of padding around 2-unit strokes). Device ports and room
-gateways use separate attachment positions. Parallel runs in either flow direction
+gateways use separate attachment positions. All ports and space boundary crossings
+use the left or right edge, with horizontal approaches; routing and subsequent
+geometry optimization cannot introduce top/bottom entries.
+
+Connections crossing the same region of the hierarchy prefer a shared corridor.
+Lane pools are centered in gaps between expanded sibling footprints, with the
+existing 10-unit separation. A source space linking to neighboring spaces uses
+the same preferred gap, and lower hierarchy levels inherit the approach side.
+Collapsed spaces retain their expanded footprint for corridor planning, keeping
+these assignments stable. Affinity is a soft cost on vertical runs: long runs
+prefer the shared lanes, while an obvious direct horizontal link stays straight.
+The router tries distinct free-space regions and may relax affinity when needed
+to fit a complete connection; side-only crossings and padding remain hard rules.
+
+Parallel runs in either flow direction
 respect this spacing; right-angle crossings remain allowed. Branches of the same
 bundled connection may intentionally share trunks. Junction dots are derived from the union
 of the final routed line segments: only points with three or four distinct
