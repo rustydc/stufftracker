@@ -43,7 +43,8 @@ type Layout = {
   bundles: {
     layer: string;
     connections: string[];
-    junction: Point;
+    junctions: Point[];
+    label_position: Point | null;
     branches: { entity: string; role: Role; points: Point[] }[];
   }[];
 };
@@ -132,9 +133,11 @@ function renderScene() {
         .join(" ");
       content += `<path class="route" stroke="${esc(layer.color)}" d="${path}" ${branch.role === "target" ? `marker-start="url(#arrow-${esc(layer.id)})"` : ""}><title>${esc(b.connections.map((id) => doc.connections.find((c) => c.id === id)!.name).join(", "))}</title></path>`;
     }
-    content += `<circle class="junction" cx="${b.junction.x}" cy="${b.junction.y}" r="4" fill="${esc(layer.color)}"/>`;
-    if (b.connections.length > 1)
-      content += `<text class="bundle-count" x="${b.junction.x + 7}" y="${b.junction.y - 7}">${b.connections.length} links</text>`;
+    for (const point of b.junctions) {
+      content += `<circle class="junction" data-connection="${esc(b.connections[0])}" cx="${point.x}" cy="${point.y}" r="4" fill="${esc(layer.color)}"><title>${esc(b.connections.map((id) => doc.connections.find((c) => c.id === id)!.name).join(", "))} · branch point</title></circle>`;
+    }
+    if (b.connections.length > 1 && b.label_position)
+      content += `<text class="bundle-count" x="${b.label_position.x + 7}" y="${b.label_position.y - 7}">${b.connections.length} links</text>`;
   }
   for (const n of current.nodes.filter((n) => !n.container || n.collapsed)) {
     const e = doc.entities.find((e) => e.id === n.id)!;
@@ -287,7 +290,7 @@ function fit() {
       { x: n.position.x + n.width, y: n.position.y + n.height },
     ]),
     ...current.bundles.flatMap((b) => [
-      b.junction,
+      ...b.junctions,
       ...b.branches.flatMap((branch) => branch.points),
     ]),
   ];

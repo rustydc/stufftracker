@@ -156,6 +156,49 @@ try {
       .evaluateAll((paths) => paths.map((p) => p.getAttribute("d"))),
     expectedPaths,
   );
+  const expectedDots = rendered.bundles.flatMap((b) =>
+    b.junctions.map((p) => ({ connection: b.connections[0], x: p.x, y: p.y })),
+  );
+  assert.deepEqual(
+    await page
+      .locator("circle.junction")
+      .evaluateAll((dots) =>
+        dots.map((dot) => ({
+          connection: dot.dataset.connection,
+          x: Number(dot.getAttribute("cx")),
+          y: Number(dot.getAttribute("cy")),
+        })),
+      ),
+    expectedDots,
+  );
+  for (const bundle of rendered.bundles)
+    for (const p of bundle.junctions) {
+      const arms = new Set();
+      for (const branch of bundle.branches)
+        for (let i = 1; i < branch.points.length; i++) {
+          const a = branch.points[i - 1],
+            b = branch.points[i];
+          if (
+            a.y === b.y &&
+            Math.abs(p.y - a.y) < 1e-7 &&
+            p.x >= Math.min(a.x, b.x) - 1e-7 &&
+            p.x <= Math.max(a.x, b.x) + 1e-7
+          ) {
+            if (p.x > Math.min(a.x, b.x) + 1e-7) arms.add("left");
+            if (p.x < Math.max(a.x, b.x) - 1e-7) arms.add("right");
+          }
+          if (
+            a.x === b.x &&
+            Math.abs(p.x - a.x) < 1e-7 &&
+            p.y >= Math.min(a.y, b.y) - 1e-7 &&
+            p.y <= Math.max(a.y, b.y) + 1e-7
+          ) {
+            if (p.y > Math.min(a.y, b.y) + 1e-7) arms.add("up");
+            if (p.y < Math.max(a.y, b.y) - 1e-7) arms.add("down");
+          }
+        }
+      assert(arms.size >= 3);
+    }
   const segments = (b) =>
     b.branches.flatMap((branch) =>
       branch.points.slice(1).map((p, i) => [branch.points[i], p]),

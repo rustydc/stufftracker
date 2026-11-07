@@ -95,7 +95,9 @@ pub struct Bundle {
     pub layer: String,
     pub connections: Vec<String>,
     pub branches: Vec<Branch>,
-    pub junction: Point,
+    /// Branch points derived from the union of the final routed segments.
+    pub junctions: Vec<Point>,
+    pub label_position: Option<Point>,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Layout {
@@ -512,11 +514,23 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
                 }
             }
         }
+        let junctions = route_junctions(&branches);
+        let label_position = junctions.first().copied().or_else(|| {
+            branches
+                .iter()
+                .flat_map(|b| b.points.windows(2))
+                .max_by(|a, b| distance(a[0], a[1]).total_cmp(&distance(b[0], b[1])))
+                .map(|p| Point {
+                    x: (p[0].x + p[1].x) / 2.,
+                    y: (p[0].y + p[1].y) / 2.,
+                })
+        });
         bundles.push(Bundle {
             layer,
             connections,
             branches,
-            junction,
+            junctions,
+            label_position,
         });
     }
     let unrouted_connections = bundles
@@ -586,6 +600,68 @@ fn track_conflict(a: Point, b: Point, tracks: &[Track]) -> bool {
                 && current.a.y.max(t.a.y) < current.b.y.min(t.b.y) - 1e-6
         }
     })
+}
+/// Count geometric directions, not branch records: overlapping branch tails
+/// contribute one arm each. A bend has two arms; a split/merge has three or four.
+/// This is evaluated separately per bundle, so crossings of independent
+/// connections never acquire a junction dot.
+fn route_junctions(branches: &[Branch]) -> Vec<Point> {
+    const EPS: f64 = 1e-7;
+    let mut segments = Vec::new();
+    for pair in branches.iter().flat_map(|b| b.points.windows(2)) {
+        let track = Track::new(pair[0], pair[1]);
+        if track.a != track.b && !segments.contains(&track) {
+            segments.push(track);
+        }
+    }
+    let mut candidates: Vec<_> = segments.iter().flat_map(|t| [t.a, t.b]).collect();
+    for (i, a) in segments.iter().enumerate() {
+        for b in &segments[i + 1..] {
+            if a.horizontal() == b.horizontal() {
+                continue;
+            }
+            let (h, v) = if a.horizontal() { (a, b) } else { (b, a) };
+            let p = Point { x: v.a.x, y: h.a.y };
+            if p.x >= h.a.x - EPS && p.x <= h.b.x + EPS && p.y >= v.a.y - EPS && p.y <= v.b.y + EPS
+            {
+                candidates.push(p);
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    candidates.dedup_by(|a, b| (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS);
+    candidates
+        .into_iter()
+        .filter(|p| {
+            let mut arms = 0_u8;
+            for t in &segments {
+                if t.horizontal()
+                    && (p.y - t.a.y).abs() < EPS
+                    && p.x >= t.a.x - EPS
+                    && p.x <= t.b.x + EPS
+                {
+                    if p.x > t.a.x + EPS {
+                        arms |= 1;
+                    }
+                    if p.x < t.b.x - EPS {
+                        arms |= 2;
+                    }
+                } else if !t.horizontal()
+                    && (p.x - t.a.x).abs() < EPS
+                    && p.y >= t.a.y - EPS
+                    && p.y <= t.b.y + EPS
+                {
+                    if p.y > t.a.y + EPS {
+                        arms |= 4;
+                    }
+                    if p.y < t.b.y - EPS {
+                        arms |= 8;
+                    }
+                }
+            }
+            arms.count_ones() >= 3
+        })
+        .collect()
 }
 fn point_clear(p: Point, tracks: &[Track]) -> bool {
     tracks
@@ -1241,6 +1317,54 @@ pub fn sample() -> Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn wire(points: &[(f64, f64)]) -> Branch {
+        Branch {
+            entity: "test".into(),
+            role: Role::Peer,
+            points: points.iter().map(|(x, y)| Point { x: *x, y: *y }).collect(),
+        }
+    }
+    #[test]
+    fn junctions_follow_the_actual_merge_instead_of_the_solver_anchor() {
+        // All three records terminate at the solver anchor (40,40). Their
+        // overlapping tails make that point a straight run; the real T is above.
+        let branches = vec![
+            wire(&[(0., 10.), (40., 10.), (40., 40.)]),
+            wire(&[(80., 10.), (40., 10.), (40., 40.)]),
+            wire(&[(40., 80.), (40., 40.)]),
+        ];
+        assert_eq!(route_junctions(&branches), vec![Point { x: 40., y: 10. }]);
+    }
+    #[test]
+    fn junctions_ignore_bends_endpoints_and_duplicate_collinear_tails() {
+        let branches = vec![
+            wire(&[(0., 0.), (20., 0.), (20., 20.)]),
+            wire(&[(40., 20.), (20., 20.)]),
+            wire(&[(40., 20.), (30., 20.), (20., 20.)]),
+        ];
+        assert!(route_junctions(&branches).is_empty());
+    }
+    #[test]
+    fn junctions_detect_midsegment_splits_without_joining_independent_crossings() {
+        let horizontal = vec![wire(&[(-20., 0.), (20., 0.)])];
+        let vertical = vec![wire(&[(0., -20.), (0., 20.)])];
+        // Separate bundles are evaluated independently, even when they cross.
+        assert!(route_junctions(&horizontal).is_empty());
+        assert!(route_junctions(&vertical).is_empty());
+        let same_connection = vec![
+            wire(&[(-20., 0.), (20., 0.)]),
+            wire(&[(0., -20.), (0., 20.)]),
+        ];
+        assert_eq!(
+            route_junctions(&same_connection),
+            vec![Point { x: 0., y: 0. }]
+        );
+        let t = vec![
+            wire(&[(-20., 0.), (20., 0.)]),
+            wire(&[(0., -20.), (0., 0.)]),
+        ];
+        assert_eq!(route_junctions(&t), vec![Point { x: 0., y: 0. }]);
+    }
     fn assert_track_spacing(result: &Layout) {
         for (i, a) in result.bundles.iter().enumerate() {
             assert!(
@@ -1400,6 +1524,10 @@ mod tests {
                 .connections
                 .iter()
                 .all(|id| result.unrouted_connections.contains(id));
+            if reported {
+                assert!(bundle.junctions.is_empty());
+                assert!(bundle.label_position.is_none());
+            }
             assert!(
                 bundle
                     .branches

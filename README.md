@@ -104,7 +104,11 @@ edge of the floor. Room-local branches share the same gateway. Independent conne
 centerline gap (8 units of padding around 2-unit strokes). Device ports and room
 gateways use separate attachment positions. Parallel runs in either flow direction
 respect this spacing; right-angle crossings remain allowed. Branches of the same
-bundled connection may intentionally share trunks. Reservations affect routes,
+bundled connection may intentionally share trunks. Junction dots are derived from the union
+of the final routed line segments: only points with three or four distinct
+directions receive markers. Overlapping tails are deduplicated, so a solver anchor,
+ordinary bend, or straight run does not automatically get a dot. Each connection
+is analyzed independently; crossings of unrelated connections are not joins. Reservations affect routes,
 not entity positions. If a corridor cannot fit a complete connection with the
 required spacing, the layout reports it in `unrouted_connections` and the viewer
 shows a “need more routing space” count instead of drawing overlapping or partial
