@@ -109,7 +109,13 @@ of the final routed line segments: only points with three or four distinct
 directions receive markers. Overlapping tails are deduplicated, so a solver anchor,
 ordinary bend, or straight run does not automatically get a dot. Each connection
 is analyzed independently; crossings of unrelated connections are not joins. Reservations affect routes,
-not entity positions. If a corridor cannot fit a complete connection with the
+not entity positions. A final geometry pass removes avoidable elbows across nested
+space boundaries. It keeps endpoint attachment directions, required track
+clearance, shared room entries, and existing branch joins, and rejects shortcuts
+through unrelated rooms or room headers. Unshared boundary crossings may align
+into a single straight run instead of adding a step for every nesting level. Shared tracks can also align as a unit: all incident branches and their
+room crossings move together, and unused common tails to a solver anchor are
+trimmed. Entity positions and endpoint ports remain fixed. If a corridor cannot fit a complete connection with the
 required spacing, the layout reports it in `unrouted_connections` and the viewer
 shows a “need more routing space” count instead of drawing overlapping or partial
 connections. Moving a card

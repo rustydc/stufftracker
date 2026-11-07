@@ -486,6 +486,16 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
                 gates.insert(ancestor, gate);
             }
         }
+        let shared_gates: BTreeMap<_, _> = gates
+            .iter()
+            .filter(|(space, _)| {
+                eps.iter()
+                    .filter(|(id, _)| router.ancestors(id).contains(space))
+                    .count()
+                    > 1
+            })
+            .map(|(id, gate)| (id.clone(), gate.boundary))
+            .collect();
         let mut branches: Vec<Branch> = eps
             .into_iter()
             .map(|(id, role)| {
@@ -497,6 +507,16 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
                 }
             })
             .collect();
+        // Boundary gateways are construction waypoints, not mandatory bends.
+        // Straighten the complete route across levels while retaining shared
+        // entries and actual joins, hierarchy constraints, and reserved tracks.
+        if branches.iter().all(|b| !b.points.is_empty()) {
+            let joins = route_junctions(&branches);
+            for branch in &mut branches {
+                branch.points = router.straighten(branch, common, &shared_gates, &joins);
+            }
+            router.align_runs(&mut branches, common, &shared_gates);
+        }
         // Do not display a partial hyperedge as though it were complete. Keep
         // hard spacing when a corridor is full and report the missing connection.
         if branches.iter().any(|branch| branch.points.is_empty()) {
@@ -1051,6 +1071,510 @@ impl HierarchyRouter<'_> {
         simplify(path)
     }
 }
+const GEOMETRY_EPS: f64 = 1e-7;
+fn path_contains(path: &[Point], point: Point) -> bool {
+    path.windows(2).any(|p| {
+        if p[0].x == p[1].x {
+            (point.x - p[0].x).abs() < GEOMETRY_EPS
+                && point.y >= p[0].y.min(p[1].y) - GEOMETRY_EPS
+                && point.y <= p[0].y.max(p[1].y) + GEOMETRY_EPS
+        } else {
+            (point.y - p[0].y).abs() < GEOMETRY_EPS
+                && point.x >= p[0].x.min(p[1].x) - GEOMETRY_EPS
+                && point.x <= p[0].x.max(p[1].x) + GEOMETRY_EPS
+        }
+    })
+}
+fn crosses_interior(a: Point, b: Point, rect: Rect) -> bool {
+    if a.x == b.x {
+        a.x > rect.position.x + GEOMETRY_EPS
+            && a.x < rect.position.x + rect.width - GEOMETRY_EPS
+            && a.y.min(b.y) < rect.position.y + rect.height - GEOMETRY_EPS
+            && a.y.max(b.y) > rect.position.y + GEOMETRY_EPS
+    } else {
+        a.y > rect.position.y + GEOMETRY_EPS
+            && a.y < rect.position.y + rect.height - GEOMETRY_EPS
+            && a.x.min(b.x) < rect.position.x + rect.width - GEOMETRY_EPS
+            && a.x.max(b.x) > rect.position.x + GEOMETRY_EPS
+    }
+}
+/// Reject leaving and then entering an ancestor again. Merely following its
+/// boundary is allowed; crossing its interior after an exit is not.
+fn single_exit(path: &[Point], rect: Rect) -> bool {
+    let Some(first) = path.first() else {
+        return false;
+    };
+    if !in_bounds(*first, rect) {
+        return false;
+    }
+    let mut outside = false;
+    for pair in path.windows(2) {
+        if outside && crosses_interior(pair[0], pair[1], rect) {
+            return false;
+        }
+        if !in_bounds(pair[1], rect) {
+            outside = true;
+        }
+    }
+    true
+}
+fn boundary_exit(path: &[Point], rect: Rect) -> Option<Point> {
+    for pair in path.windows(2) {
+        let a = pair[0];
+        let b = pair[1];
+        if in_bounds(a, rect) && !in_bounds(b, rect) {
+            return Some(if a.x == b.x {
+                Point {
+                    x: a.x,
+                    y: if b.y < a.y {
+                        rect.position.y
+                    } else {
+                        rect.position.y + rect.height
+                    },
+                }
+            } else {
+                Point {
+                    x: if b.x < a.x {
+                        rect.position.x
+                    } else {
+                        rect.position.x + rect.width
+                    },
+                    y: a.y,
+                }
+            });
+        }
+    }
+    None
+}
+/// Geometry checks shared by individual shortcutting and coordinated track
+/// alignment. Topology checks live at the connection level below.
+struct RouteGuard<'a> {
+    tracks: &'a [Track],
+    own: Rect,
+    solids: Vec<Rect>,
+    headers: Vec<Rect>,
+    boxes: Vec<(String, Rect)>,
+    bounds: Option<Rect>,
+    port: Point,
+    outward: Point,
+}
+impl<'a> RouteGuard<'a> {
+    fn new(router: &HierarchyRouter<'a>, branch: &Branch, common: Option<&str>) -> Self {
+        let ancestors = router.ancestors(&branch.entity);
+        let own = router.node(&branch.entity);
+        Self {
+            tracks: router.tracks,
+            own: Rect {
+                position: own.position,
+                width: own.width,
+                height: own.height,
+            },
+            solids: router
+                .nodes
+                .iter()
+                .filter(|n| n.id != branch.entity && !ancestors.contains(&n.id))
+                .map(|n| Rect {
+                    position: n.position,
+                    width: n.width,
+                    height: n.height,
+                })
+                .collect(),
+            headers: ancestors
+                .iter()
+                .map(|id| {
+                    let n = router.node(id);
+                    Rect {
+                        position: n.position,
+                        width: n.width,
+                        height: 52.,
+                    }
+                })
+                .collect(),
+            boxes: ancestors
+                .iter()
+                .take_while(|id| Some(id.as_str()) != common)
+                .map(|id| {
+                    let n = router.node(id);
+                    (
+                        id.clone(),
+                        Rect {
+                            position: n.position,
+                            width: n.width,
+                            height: n.height,
+                        },
+                    )
+                })
+                .collect(),
+            bounds: router.bounds(common),
+            port: branch.points[0],
+            outward: Point {
+                x: branch.points[1].x - branch.points[0].x,
+                y: branch.points[1].y - branch.points[0].y,
+            },
+        }
+    }
+    fn allows(&self, path: &[Point]) -> bool {
+        if path.len() < 2 || distance(path[0], self.port) > GEOMETRY_EPS {
+            return false;
+        }
+        let edge = Point {
+            x: path[1].x - path[0].x,
+            y: path[1].y - path[0].y,
+        };
+        if self.outward.x * edge.x + self.outward.y * edge.y <= 0.
+            || self.outward.x * edge.y != self.outward.y * edge.x
+        {
+            return false;
+        }
+        if path
+            .iter()
+            .any(|p| self.bounds.is_some_and(|b| !in_bounds(*p, b)))
+        {
+            return false;
+        }
+        for (i, p) in path.windows(2).enumerate() {
+            if (p[0].x != p[1].x && p[0].y != p[1].y)
+                || blocked(p[0], p[1], &self.solids)
+                || blocked(p[0], p[1], &self.headers)
+                || track_conflict(p[0], p[1], self.tracks)
+            {
+                return false;
+            }
+            if i > 0 && blocked(p[0], p[1], &[self.own]) {
+                return false;
+            }
+        }
+        self.boxes
+            .iter()
+            .all(|(_, rect)| single_exit(path, *rect) && !in_bounds(*path.last().unwrap(), *rect))
+    }
+}
+#[derive(Clone, Copy)]
+struct ConnectedRun {
+    horizontal: bool,
+    axis: f64,
+    lo: f64,
+    hi: f64,
+}
+impl ConnectedRun {
+    fn contains(self, p: Point) -> bool {
+        let (axis, along) = if self.horizontal {
+            (p.y, p.x)
+        } else {
+            (p.x, p.y)
+        };
+        (axis - self.axis).abs() < GEOMETRY_EPS
+            && along >= self.lo - GEOMETRY_EPS
+            && along <= self.hi + GEOMETRY_EPS
+    }
+    fn shifted(self, p: Point, axis: f64) -> Point {
+        if !self.contains(p) {
+            p
+        } else if self.horizontal {
+            Point { x: p.x, y: axis }
+        } else {
+            Point { x: axis, y: p.y }
+        }
+    }
+}
+fn connected_runs(branches: &[Branch]) -> Vec<ConnectedRun> {
+    let mut runs: Vec<_> = branches
+        .iter()
+        .flat_map(|b| b.points.windows(2))
+        .filter(|p| p[0] != p[1])
+        .map(|p| {
+            let t = Track::new(p[0], p[1]);
+            if t.horizontal() {
+                ConnectedRun {
+                    horizontal: true,
+                    axis: t.a.y,
+                    lo: t.a.x,
+                    hi: t.b.x,
+                }
+            } else {
+                ConnectedRun {
+                    horizontal: false,
+                    axis: t.a.x,
+                    lo: t.a.y,
+                    hi: t.b.y,
+                }
+            }
+        })
+        .collect();
+    runs.sort_by(|a, b| {
+        a.horizontal
+            .cmp(&b.horizontal)
+            .then(a.axis.total_cmp(&b.axis))
+            .then(a.lo.total_cmp(&b.lo))
+    });
+    let mut merged: Vec<ConnectedRun> = Vec::new();
+    for run in runs {
+        if let Some(previous) = merged.last_mut().filter(|p| {
+            p.horizontal == run.horizontal
+                && (p.axis - run.axis).abs() < GEOMETRY_EPS
+                && run.lo <= p.hi + GEOMETRY_EPS
+        }) {
+            previous.hi = previous.hi.max(run.hi);
+        } else {
+            merged.push(run);
+        }
+    }
+    merged
+}
+/// A coincident tail ending at the solver's anchor can become redundant when
+/// two tracks align. Trim only a suffix shared by every endpoint branch.
+fn trim_common_tail(paths: &mut [Vec<Point>]) {
+    loop {
+        if paths.iter().any(|p| p.len() < 2) {
+            return;
+        }
+        let anchor = *paths[0].last().unwrap();
+        if paths
+            .iter()
+            .any(|p| distance(*p.last().unwrap(), anchor) > GEOMETRY_EPS)
+        {
+            return;
+        }
+        let prev = paths[0][paths[0].len() - 2];
+        let sign = |d: f64| {
+            if d.abs() < GEOMETRY_EPS {
+                0.
+            } else {
+                d.signum()
+            }
+        };
+        let direction = Point {
+            x: sign(prev.x - anchor.x),
+            y: sign(prev.y - anchor.y),
+        };
+        if paths.iter().any(|p| {
+            let prev = p[p.len() - 2];
+            sign(prev.x - anchor.x) != direction.x || sign(prev.y - anchor.y) != direction.y
+        }) {
+            return;
+        }
+        let step = paths
+            .iter()
+            .map(|p| distance(p[p.len() - 2], anchor))
+            .fold(f64::INFINITY, f64::min);
+        if step <= GEOMETRY_EPS
+            || paths
+                .iter()
+                .any(|p| p.len() == 2 && distance(p[0], anchor) <= step + GEOMETRY_EPS)
+        {
+            return;
+        }
+        let next = Point {
+            x: anchor.x + direction.x * step,
+            y: anchor.y + direction.y * step,
+        };
+        for path in &mut *paths {
+            *path.last_mut().unwrap() = next;
+            *path = simplify(std::mem::take(path));
+        }
+    }
+}
+impl HierarchyRouter<'_> {
+    fn align_runs(
+        &self,
+        branches: &mut [Branch],
+        common: Option<&str>,
+        shared: &BTreeMap<String, Point>,
+    ) {
+        loop {
+            // Simplification can expose a common solver tail even when there
+            // are no further tracks to align. Remove that tail before searching.
+            let old_joins = route_junctions(branches);
+            let tail_guards: Vec<_> = branches
+                .iter()
+                .map(|b| RouteGuard::new(self, b, common))
+                .collect();
+            let mut trimmed: Vec<_> = branches.iter().map(|b| b.points.clone()).collect();
+            trim_common_tail(&mut trimmed);
+            if tail_guards.iter().zip(&trimmed).all(|(g, p)| g.allows(p))
+                && old_joins.iter().all(|join| {
+                    branches
+                        .iter()
+                        .zip(&trimmed)
+                        .all(|(b, p)| !path_contains(&b.points, *join) || path_contains(p, *join))
+                })
+            {
+                for (branch, path) in branches.iter_mut().zip(trimmed) {
+                    branch.points = path;
+                }
+            }
+            let runs = connected_runs(branches);
+            let joins = route_junctions(branches);
+            let guards: Vec<_> = branches
+                .iter()
+                .map(|b| RouteGuard::new(self, b, common))
+                .collect();
+            let baseline: usize = branches.iter().map(|b| b.points.len()).sum();
+            let mut accepted = None;
+            'search: for run in &runs {
+                if branches.iter().any(|b| run.contains(b.points[0])) {
+                    continue;
+                }
+                // Only align runs connected by a perpendicular leg. Sliding
+                // arbitrary unrelated tracks can create a new accidental join.
+                let mut axes: Vec<_> = runs
+                    .iter()
+                    .filter(|other| {
+                        other.horizontal == run.horizontal
+                            && (other.axis - run.axis).abs() > GEOMETRY_EPS
+                    })
+                    .filter(|other| {
+                        branches.iter().flat_map(|b| b.points.windows(2)).any(|p| {
+                            if run.horizontal {
+                                p[0].x == p[1].x
+                                    && p[0].x >= run.lo - GEOMETRY_EPS
+                                    && p[0].x <= run.hi + GEOMETRY_EPS
+                                    && p[0].x >= other.lo - GEOMETRY_EPS
+                                    && p[0].x <= other.hi + GEOMETRY_EPS
+                                    && p[0].y.min(p[1].y) <= run.axis.min(other.axis) + GEOMETRY_EPS
+                                    && p[0].y.max(p[1].y) >= run.axis.max(other.axis) - GEOMETRY_EPS
+                            } else {
+                                p[0].y == p[1].y
+                                    && p[0].y >= run.lo - GEOMETRY_EPS
+                                    && p[0].y <= run.hi + GEOMETRY_EPS
+                                    && p[0].y >= other.lo - GEOMETRY_EPS
+                                    && p[0].y <= other.hi + GEOMETRY_EPS
+                                    && p[0].x.min(p[1].x) <= run.axis.min(other.axis) + GEOMETRY_EPS
+                                    && p[0].x.max(p[1].x) >= run.axis.max(other.axis) - GEOMETRY_EPS
+                            }
+                        })
+                    })
+                    .map(|other| other.axis)
+                    .collect();
+                axes.sort_by(|a, b| (a - run.axis).abs().total_cmp(&(b - run.axis).abs()));
+                axes.dedup_by(|a, b| (*a - *b).abs() < GEOMETRY_EPS);
+                'axis: for axis in axes {
+                    let mut paths: Vec<_> = branches
+                        .iter()
+                        .map(|b| simplify(b.points.iter().map(|p| run.shifted(*p, axis)).collect()))
+                        .collect();
+                    trim_common_tail(&mut paths);
+                    if paths.iter().map(Vec::len).sum::<usize>() >= baseline
+                        || !guards.iter().zip(&paths).all(|(g, p)| g.allows(p))
+                    {
+                        continue;
+                    }
+                    // Every previously shared geometric join stays incident to
+                    // the same branches; only its position may move as a unit.
+                    if joins.iter().any(|join| {
+                        branches.iter().zip(&paths).any(|(b, p)| {
+                            path_contains(&b.points, *join)
+                                && !path_contains(p, run.shifted(*join, axis))
+                        })
+                    }) {
+                        continue;
+                    }
+                    for id in shared.keys() {
+                        let mut expected = None;
+                        for (guard, path) in guards.iter().zip(&paths) {
+                            if let Some((_, rect)) =
+                                guard.boxes.iter().find(|(space, _)| space == id)
+                            {
+                                let Some(exit) = boundary_exit(path, *rect) else {
+                                    continue 'axis;
+                                };
+                                if expected.is_some_and(|p| distance(p, exit) > GEOMETRY_EPS) {
+                                    continue 'axis;
+                                }
+                                expected = Some(exit);
+                            }
+                        }
+                    }
+                    accepted = Some(paths);
+                    break 'search;
+                }
+            }
+            let Some(paths) = accepted else {
+                break;
+            };
+            for (branch, path) in branches.iter_mut().zip(paths) {
+                branch.points = path;
+            }
+            let current_shared: BTreeMap<_, _> = shared
+                .keys()
+                .filter_map(|id| {
+                    guards
+                        .iter()
+                        .zip(&*branches)
+                        .find_map(|(guard, b)| {
+                            guard
+                                .boxes
+                                .iter()
+                                .find(|(space, _)| space == id)
+                                .and_then(|(_, rect)| boundary_exit(&b.points, *rect))
+                        })
+                        .map(|point| (id.clone(), point))
+                })
+                .collect();
+            let current_joins = route_junctions(branches);
+            for b in &mut *branches {
+                b.points = self.straighten(b, common, &current_shared, &current_joins);
+            }
+        }
+    }
+    fn straighten(
+        &self,
+        branch: &Branch,
+        common: Option<&str>,
+        shared: &BTreeMap<String, Point>,
+        joins: &[Point],
+    ) -> Vec<Point> {
+        let original = &branch.points;
+        if original.len() < 4 {
+            return original.clone();
+        }
+        let guard = RouteGuard::new(self, branch, common);
+        let locks: Vec<_> = joins
+            .iter()
+            .copied()
+            .filter(|p| path_contains(original, *p))
+            .collect();
+        let valid = |path: &[Point]| {
+            guard.allows(path)
+                && guard.boxes.iter().all(|(id, rect)| {
+                    shared.get(id).is_none_or(|gate| {
+                        boundary_exit(path, *rect)
+                            .is_some_and(|p| distance(p, *gate) <= GEOMETRY_EPS)
+                    })
+                })
+                && locks.iter().all(|p| path_contains(path, *p))
+        };
+        let mut path = original.clone();
+        loop {
+            let mut improved = None;
+            // Longest intervals first: a single shortcut can align entries
+            // through several nested spaces instead of adding one elbow each.
+            'search: for span in (2..path.len()).rev() {
+                for start in 1..path.len() - span {
+                    let end = start + span;
+                    let a = path[start];
+                    let b = path[end];
+                    for elbow in [Point { x: b.x, y: a.y }, Point { x: a.x, y: b.y }] {
+                        let mut candidate = path[..start].to_vec();
+                        candidate.extend([a, elbow, b]);
+                        candidate.extend_from_slice(&path[end + 1..]);
+                        let candidate = simplify(candidate);
+                        if candidate.len() < path.len() && valid(&candidate) {
+                            improved = Some(candidate);
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            if let Some(candidate) = improved {
+                path = candidate;
+            } else {
+                break;
+            }
+        }
+        path
+    }
+}
 fn in_bounds(p: Point, b: Rect) -> bool {
     p.x >= b.position.x
         && p.x <= b.position.x + b.width
@@ -1317,6 +1841,243 @@ pub fn sample() -> Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trimming_a_shared_anchor_tail_stays_axis_aligned() {
+        let mut paths = vec![
+            vec![
+                Point { x: 0., y: 0. },
+                Point { x: 40., y: 0. },
+                Point { x: 40., y: 80. },
+            ],
+            vec![
+                Point { x: 80., y: 40. },
+                Point { x: 40., y: 40. },
+                Point { x: 40., y: 80. },
+            ],
+            vec![
+                Point { x: 0., y: 40. },
+                Point { x: 40., y: 40. },
+                Point { x: 40., y: 80. },
+            ],
+        ];
+        trim_common_tail(&mut paths);
+        for path in &paths {
+            assert_eq!(path.last(), Some(&Point { x: 40., y: 40. }));
+            assert!(
+                path.windows(2)
+                    .all(|p| p[0].x == p[1].x || p[0].y == p[1].y)
+            );
+        }
+    }
+    #[test]
+    fn shared_run_alignment_reduces_bends_without_detaching_branches() {
+        let mut doc = sample();
+        doc.entities
+            .retain(|e| ["house", "panel", "lamp", "sensor"].contains(&e.id.as_str()));
+        doc.connections.clear();
+        for e in &mut doc.entities {
+            if e.id != "house" {
+                e.parent = Some("house".into());
+            }
+        }
+        let positions = BTreeMap::from([
+            ("house".into(), Point { x: 0., y: 0. }),
+            ("panel".into(), Point { x: 80., y: 80. }),
+            ("lamp".into(), Point { x: 80., y: 200. }),
+            ("sensor".into(), Point { x: 400., y: 200. }),
+        ]);
+        let result = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: View {
+                layout_version: 2,
+                positions,
+                ..View::default()
+            },
+        })
+        .unwrap();
+        let router = HierarchyRouter {
+            document: &doc,
+            nodes: &result.nodes,
+            tracks: &[],
+        };
+        let make = |id: &str, points: &[(f64, f64)]| Branch {
+            entity: id.into(),
+            role: Role::Peer,
+            points: points.iter().map(|(x, y)| Point { x: *x, y: *y }).collect(),
+        };
+        let mut branches = vec![
+            make(
+                "panel",
+                &[
+                    (280., 116.),
+                    (312., 116.),
+                    (312., 176.),
+                    (340., 176.),
+                    (340., 260.),
+                ],
+            ),
+            make(
+                "lamp",
+                &[(280., 236.), (312., 236.), (312., 260.), (340., 260.)],
+            ),
+            make("sensor", &[(400., 236.), (340., 236.), (340., 260.)]),
+        ];
+        let guards: Vec<_> = branches
+            .iter()
+            .map(|b| RouteGuard::new(&router, b, Some("house")))
+            .collect();
+        let ports: Vec<_> = branches.iter().map(|b| b.points[0]).collect();
+        let before: usize = branches.iter().map(|b| b.points.len()).sum();
+        assert!(
+            guards
+                .iter()
+                .zip(&branches)
+                .all(|(g, b)| g.allows(&b.points)),
+            "invalid fixture geometry"
+        );
+        router.align_runs(&mut branches, Some("house"), &BTreeMap::new());
+        assert!(branches.iter().map(|b| b.points.len()).sum::<usize>() <= before - 4);
+        for ((branch, guard), port) in branches.iter().zip(&guards).zip(ports) {
+            assert_eq!(branch.points[0], port);
+            assert!(guard.allows(&branch.points));
+            assert_eq!(branch.points.last(), branches[0].points.last());
+        }
+        assert_eq!(route_junctions(&branches).len(), 1);
+    }
+    fn nested_staircase() -> (Document, Layout, Branch) {
+        let mut doc = sample();
+        doc.entities
+            .retain(|e| ["house", "upstairs", "office", "desk"].contains(&e.id.as_str()));
+        doc.connections.clear();
+        let result = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: View::default(),
+        })
+        .unwrap();
+        let n = |id: &str| result.nodes.iter().find(|n| n.id == id).unwrap();
+        let desk = n("desk");
+        let office = n("office");
+        let upstairs = n("upstairs");
+        let house = n("house");
+        let points = vec![
+            Point {
+                x: desk.position.x,
+                y: desk.position.y + 36.,
+            },
+            Point {
+                x: desk.position.x - 12.,
+                y: desk.position.y + 36.,
+            },
+            Point {
+                x: office.position.x + 12.,
+                y: office.position.y + 64.,
+            },
+            Point {
+                x: office.position.x - 12.,
+                y: office.position.y + 64.,
+            },
+            Point {
+                x: upstairs.position.x + 12.,
+                y: upstairs.position.y + 64.,
+            },
+            Point {
+                x: upstairs.position.x - 12.,
+                y: upstairs.position.y + 64.,
+            },
+            Point {
+                x: house.position.x + 12.,
+                y: house.position.y + 64.,
+            },
+        ];
+        let branch = Branch {
+            entity: "desk".into(),
+            role: Role::Target,
+            points,
+        };
+        (doc, result, branch)
+    }
+    #[test]
+    fn nested_boundary_staircase_straightens_into_one_bend() {
+        let (doc, result, branch) = nested_staircase();
+        let router = HierarchyRouter {
+            document: &doc,
+            nodes: &result.nodes,
+            tracks: &[],
+        };
+        let path = router.straighten(&branch, Some("house"), &BTreeMap::new(), &[]);
+        assert_eq!(
+            path,
+            vec![
+                branch.points[0],
+                Point {
+                    x: branch.points.last().unwrap().x,
+                    y: branch.points[0].y
+                },
+                *branch.points.last().unwrap()
+            ]
+        );
+        for id in ["office", "upstairs"] {
+            let n = router.node(id);
+            let rect = Rect {
+                position: n.position,
+                width: n.width,
+                height: n.height,
+            };
+            assert!(single_exit(&path, rect));
+        }
+    }
+    #[test]
+    fn straightening_retains_needed_offsets_for_track_padding() {
+        let (doc, result, branch) = nested_staircase();
+        let tracks = [Track::new(
+            Point {
+                x: branch.points.last().unwrap().x,
+                y: branch.points[0].y,
+            },
+            branch.points[1],
+        )];
+        let router = HierarchyRouter {
+            document: &doc,
+            nodes: &result.nodes,
+            tracks: &tracks,
+        };
+        let path = router.straighten(&branch, Some("house"), &BTreeMap::new(), &[]);
+        assert!(path.len() > 3 && path.len() < branch.points.len());
+        assert!(
+            path.windows(2)
+                .all(|p| !track_conflict(p[0], p[1], &tracks))
+        );
+    }
+    #[test]
+    fn straightening_preserves_shared_gateways_and_branch_joins() {
+        let (doc, result, branch) = nested_staircase();
+        let router = HierarchyRouter {
+            document: &doc,
+            nodes: &result.nodes,
+            tracks: &[],
+        };
+        let office = router.node("office");
+        let gate = Point {
+            x: office.position.x,
+            y: office.position.y + 64.,
+        };
+        let shared = BTreeMap::from([("office".into(), gate)]);
+        let join = branch.points[3];
+        let path = router.straighten(&branch, Some("house"), &shared, &[join]);
+        assert!(path.len() < branch.points.len());
+        assert!(path_contains(&path, join));
+        assert_eq!(
+            boundary_exit(
+                &path,
+                Rect {
+                    position: office.position,
+                    width: office.width,
+                    height: office.height
+                }
+            ),
+            Some(gate)
+        );
+    }
     fn wire(points: &[(f64, f64)]) -> Branch {
         Branch {
             entity: "test".into(),

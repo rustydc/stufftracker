@@ -135,6 +135,14 @@ try {
   ).json();
   assert.equal(native.nodes.length, 17);
   assert.deepEqual(native.unrouted_connections, []);
+  const workstation = native.bundles.flatMap((bundle) =>
+    bundle.branches.filter((branch) => branch.entity === "desk"),
+  );
+  assert.equal(workstation.length, 1);
+  assert(
+    workstation[0].points.length <= 4,
+    "Workstation route should not add an elbow at each nested boundary",
+  );
   const activeView = (
     await (await page.request.get(`${base}api/views`)).json()
   ).find((v) => v.name === "Browser test perspective").view;
@@ -160,15 +168,13 @@ try {
     b.junctions.map((p) => ({ connection: b.connections[0], x: p.x, y: p.y })),
   );
   assert.deepEqual(
-    await page
-      .locator("circle.junction")
-      .evaluateAll((dots) =>
-        dots.map((dot) => ({
-          connection: dot.dataset.connection,
-          x: Number(dot.getAttribute("cx")),
-          y: Number(dot.getAttribute("cy")),
-        })),
-      ),
+    await page.locator("circle.junction").evaluateAll((dots) =>
+      dots.map((dot) => ({
+        connection: dot.dataset.connection,
+        x: Number(dot.getAttribute("cx")),
+        y: Number(dot.getAttribute("cy")),
+      })),
+    ),
     expectedDots,
   );
   for (const bundle of rendered.bundles)
