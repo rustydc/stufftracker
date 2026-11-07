@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>StuffTracker</title>
+    <style>
+      /*STYLES*/
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <a class="brand" href="#"
+          ><span class="brand-icon">▧</span>StuffTracker<span class="beta"
+            >WORKBENCH</span
+          ></a
+        ><span id="mode">Your spaces, connected.</span>
+        <div class="header-actions">
+          <button id="save-document">Save changes</button
+          ><button id="export" class="primary">↗ Export viewer</button>
+        </div>
+      </header>
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-title">
+            <span>YOUR INVENTORY</span
+            ><button id="add" title="Add entity">＋</button>
+          </div>
+          <label class="search"
+            ><span>⌕</span
+            ><input
+              id="search"
+              placeholder="Find a space or thing…"
+              aria-label="Search inventory"
+          /></label>
+          <div id="tree"></div>
+          <div class="sidebar-bottom">
+            <span class="status-dot"></span> Independent hierarchy<br /><small
+              >External systems link to your things.</small
+            >
+          </div>
+        </aside>
+        <main>
+          <div class="canvas-toolbar">
+            <div>
+              <span class="eyebrow">SPATIAL WORKSPACE</span>
+              <h1>House connections</h1>
+            </div>
+            <div class="toolbar-actions">
+              <select id="views" aria-label="Saved views">
+                <option value="">Unsaved view</option></select
+              ><button id="save-view">Save view</button>
+            </div>
+          </div>
+          <div id="canvas">
+            <svg id="graph" aria-label="Interactive inventory graph" role="img">
+              <defs>
+                <pattern
+                  id="dots"
+                  width="24"
+                  height="24"
+                  patternUnits="userSpaceOnUse"
+                >
+                  <circle cx="1" cy="1" r="1" fill="#d7ddd8" />
+                </pattern>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#dots)" />
+              <g id="scene"></g>
+            </svg>
+            <div class="canvas-hint">
+              Drag things to arrange · Double-click a space to fold · Scroll to
+              zoom
+            </div>
+            <div class="zoom-controls">
+              <button id="zoom-out" aria-label="Zoom out">−</button
+              ><span id="zoom">100%</span
+              ><button id="zoom-in" aria-label="Zoom in">＋</button
+              ><button id="fit">Fit all</button>
+            </div>
+          </div>
+          <footer>
+            <span id="counts"></span
+            ><span id="status" role="status">Starting Rust engine…</span>
+          </footer>
+        </main>
+        <aside class="details">
+          <section>
+            <span class="eyebrow">CONNECTION LAYERS</span>
+            <h2>A little clarity.</h2>
+            <p class="muted">Show the systems you want to explore.</p>
+            <div id="layers"></div>
+          </section>
+          <section id="inspector"></section>
+          <div class="note">
+            <span>↗</span>
+            <div>
+              <b>A map that stays yours</b>
+              <p>
+                Fold a room or hide a layer. Everything else stays right where
+                you left it.
+              </p>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+    <dialog id="view-dialog">
+      <form id="view-form">
+        <h2>Save this perspective</h2>
+        <label
+          >View name<input
+            id="view-name"
+            required
+            maxlength="100"
+            placeholder="e.g. Ground floor · Power"
+        /></label>
+        <div class="dialog-actions">
+          <button type="button" id="cancel-view">Cancel</button
+          ><button class="primary">Save view</button>
+        </div>
+      </form>
+    </dialog>
+    <script id="snapshot" type="application/json">
+      null
+    </script>
+    <script>
+      /*SCRIPT*/
+    </script>
+  </body>
+</html>

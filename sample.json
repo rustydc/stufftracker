@@ -1,0 +1,267 @@
+{
+  "entities": [
+    {
+      "id": "house",
+      "name": "Juniper House",
+      "kind": "space",
+      "parent": null,
+      "links": []
+    },
+    {
+      "id": "ground",
+      "name": "Ground floor",
+      "kind": "space",
+      "parent": "house",
+      "links": []
+    },
+    {
+      "id": "upstairs",
+      "name": "Upstairs",
+      "kind": "space",
+      "parent": "house",
+      "links": []
+    },
+    {
+      "id": "utility",
+      "name": "Utility room",
+      "kind": "space",
+      "parent": "ground",
+      "links": []
+    },
+    {
+      "id": "kitchen",
+      "name": "Kitchen",
+      "kind": "space",
+      "parent": "ground",
+      "links": []
+    },
+    {
+      "id": "living",
+      "name": "Living room",
+      "kind": "space",
+      "parent": "ground",
+      "links": []
+    },
+    {
+      "id": "office",
+      "name": "Office",
+      "kind": "space",
+      "parent": "upstairs",
+      "links": []
+    },
+    {
+      "id": "panel",
+      "name": "Electrical panel",
+      "kind": "equipment",
+      "parent": "utility",
+      "links": []
+    },
+    {
+      "id": "router",
+      "name": "Network router",
+      "kind": "device",
+      "parent": "utility",
+      "links": []
+    },
+    {
+      "id": "ha",
+      "name": "Home Assistant",
+      "kind": "service",
+      "parent": "utility",
+      "links": []
+    },
+    {
+      "id": "lamp",
+      "name": "Pendant lights",
+      "kind": "device",
+      "parent": "kitchen",
+      "links": [
+        {
+          "provider": "home_assistant",
+          "kind": "entity",
+          "external_id": "light.kitchen_pendants"
+        }
+      ]
+    },
+    {
+      "id": "sensor",
+      "name": "Temperature sensor",
+      "kind": "device",
+      "parent": "kitchen",
+      "links": []
+    },
+    {
+      "id": "tv",
+      "name": "Television",
+      "kind": "device",
+      "parent": "living",
+      "links": []
+    },
+    {
+      "id": "speaker",
+      "name": "Speaker",
+      "kind": "device",
+      "parent": "living",
+      "links": []
+    },
+    {
+      "id": "desk",
+      "name": "Workstation",
+      "kind": "device",
+      "parent": "office",
+      "links": []
+    },
+    {
+      "id": "water",
+      "name": "Water supply",
+      "kind": "equipment",
+      "parent": "utility",
+      "links": []
+    },
+    {
+      "id": "tap",
+      "name": "Kitchen sink",
+      "kind": "equipment",
+      "parent": "kitchen",
+      "links": []
+    }
+  ],
+  "layers": [
+    {
+      "id": "power",
+      "name": "Power",
+      "color": "#d99832"
+    },
+    {
+      "id": "network",
+      "name": "Network",
+      "color": "#5795e5"
+    },
+    {
+      "id": "water",
+      "name": "Water",
+      "color": "#37b7bf"
+    },
+    {
+      "id": "automation",
+      "name": "Automation",
+      "color": "#b284da"
+    }
+  ],
+  "connections": [
+    {
+      "id": "circuit",
+      "name": "Kitchen circuit",
+      "layer": "power",
+      "endpoints": [
+        {
+          "entity": "panel",
+          "role": "source"
+        },
+        {
+          "entity": "lamp",
+          "role": "target"
+        },
+        {
+          "entity": "sensor",
+          "role": "target"
+        }
+      ]
+    },
+    {
+      "id": "living-power",
+      "name": "Living circuit",
+      "layer": "power",
+      "endpoints": [
+        {
+          "entity": "panel",
+          "role": "source"
+        },
+        {
+          "entity": "tv",
+          "role": "target"
+        },
+        {
+          "entity": "speaker",
+          "role": "target"
+        }
+      ]
+    },
+    {
+      "id": "ethernet",
+      "name": "Ethernet",
+      "layer": "network",
+      "endpoints": [
+        {
+          "entity": "router",
+          "role": "source"
+        },
+        {
+          "entity": "tv",
+          "role": "target"
+        },
+        {
+          "entity": "desk",
+          "role": "target"
+        },
+        {
+          "entity": "ha",
+          "role": "target"
+        }
+      ]
+    },
+    {
+      "id": "wifi",
+      "name": "Wi-Fi",
+      "layer": "network",
+      "endpoints": [
+        {
+          "entity": "router",
+          "role": "source"
+        },
+        {
+          "entity": "sensor",
+          "role": "target"
+        },
+        {
+          "entity": "speaker",
+          "role": "target"
+        }
+      ]
+    },
+    {
+      "id": "water-feed",
+      "name": "Cold water",
+      "layer": "water",
+      "endpoints": [
+        {
+          "entity": "water",
+          "role": "source"
+        },
+        {
+          "entity": "tap",
+          "role": "target"
+        }
+      ]
+    },
+    {
+      "id": "automation",
+      "name": "Evening lighting",
+      "layer": "automation",
+      "endpoints": [
+        {
+          "entity": "ha",
+          "role": "source"
+        },
+        {
+          "entity": "lamp",
+          "role": "target"
+        },
+        {
+          "entity": "sensor",
+          "role": "target"
+        }
+      ]
+    }
+  ]
+}

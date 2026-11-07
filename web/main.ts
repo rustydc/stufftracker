@@ -1,0 +1,522 @@
+import init, { compute } from "./pkg/stufftracker_core";
+declare const WASM_BASE64: string;
+type Point = { x: number; y: number };
+type Entity = {
+  id: string;
+  name: string;
+  kind: string;
+  parent: string | null;
+  links: { provider: string; kind: string; external_id: string }[];
+};
+type Role = "source" | "target" | "peer";
+type Connection = {
+  id: string;
+  name: string;
+  layer: string;
+  endpoints: { entity: string; role: Role }[];
+};
+type DocumentData = {
+  entities: Entity[];
+  connections: Connection[];
+  layers: { id: string; name: string; color: string }[];
+};
+type View = {
+  positions: Record<string, Point>;
+  collapsed: string[];
+  hidden_layers: string[];
+};
+type Layout = {
+  positions: Record<string, Point>;
+  nodes: { id: string; position: Point; children: number }[];
+  bundles: {
+    layer: string;
+    connections: string[];
+    junction: Point;
+    branches: { entity: string; role: Role; points: Point[] }[];
+  }[];
+};
+type SavedView = { id: string; name: string; view: View };
+const $ = <T extends HTMLElement>(id: string) =>
+  document.getElementById(id) as T;
+const esc = (s: string) =>
+  s.replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ]!,
+  );
+const icon = (kind: string) =>
+  ({ space: "▧", device: "◈", equipment: "▤", service: "◇" })[kind] || "◈";
+let doc: DocumentData,
+  view: View = { positions: {}, collapsed: [], hidden_layers: [] },
+  revision = 0;
+let offline = false,
+  writable = false,
+  selected = "kitchen",
+  dirty = false,
+  savedViews: SavedView[] = [],
+  current: Layout;
+let camera = { x: 0, y: 0, scale: 1 },
+  first = true;
+const svg = $("graph") as unknown as SVGSVGElement;
+function status(text: string, error = false) {
+  $("status").textContent = text;
+  $("status").classList.toggle("error", error);
+}
+async function api(path: string, options?: RequestInit) {
+  const r = await fetch(`api/${path}`, options);
+  if (!r.ok) throw new Error(await r.text());
+  return r.status === 204 ? null : r.json();
+}
+function run(fn: () => unknown | Promise<unknown>) {
+  return () => {
+    try {
+      Promise.resolve(fn()).catch((e) => status(String(e.message || e), true));
+    } catch (e) {
+      status(String(e), true);
+    }
+  };
+}
+function computeLayout() {
+  current = JSON.parse(compute(JSON.stringify({ document: doc, view })));
+  view.positions = current.positions;
+}
+function render() {
+  computeLayout();
+  renderScene();
+  renderTree();
+  renderLayers();
+  renderInspector();
+  $("counts").textContent =
+    `${current.nodes.length} of ${doc.entities.length} things · ${current.bundles.length} visible connections`;
+  $<HTMLButtonElement>("save-document").disabled = !writable || !dirty;
+  if (first) {
+    first = false;
+    fit();
+  }
+}
+function renderScene() {
+  const positions = new Map(current.nodes.map((n) => [n.id, n.position]));
+  let content = "";
+  for (const l of doc.layers) {
+    content += `<defs><marker id="arrow-${esc(l.id)}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="${esc(l.color)}"/></marker></defs>`;
+  }
+  for (const n of current.nodes) {
+    const e = doc.entities.find((e) => e.id === n.id)!;
+    const p = e.parent && positions.get(e.parent);
+    if (p) {
+      const q = n.position;
+      content += `<path class="hierarchy" d="M${p.x + 200},${p.y + 36} H${p.x + 236} V${q.y + 36} H${q.x}"/>`;
+    }
+  }
+  for (const b of current.bundles) {
+    const layer = doc.layers.find((l) => l.id === b.layer)!;
+    for (const branch of b.branches) {
+      if (!branch.points.length) continue;
+      const path = branch.points
+        .map((p, i) => `${i ? "L" : "M"}${p.x},${p.y}`)
+        .join(" ");
+      content += `<path class="route" stroke="${esc(layer.color)}" d="${path}" ${branch.role === "target" ? `marker-start="url(#arrow-${esc(layer.id)})"` : ""}><title>${esc(b.connections.map((id) => doc.connections.find((c) => c.id === id)!.name).join(", "))}</title></path>`;
+    }
+    content += `<circle class="junction" cx="${b.junction.x}" cy="${b.junction.y}" r="4" fill="${esc(layer.color)}"/>`;
+    if (b.connections.length > 1)
+      content += `<text class="bundle-count" x="${b.junction.x + 7}" y="${b.junction.y - 7}">${b.connections.length} links</text>`;
+  }
+  for (const n of current.nodes) {
+    const e = doc.entities.find((e) => e.id === n.id)!;
+    content += `<g class="node ${selected === n.id ? "selected" : ""}" data-id="${esc(n.id)}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="200" height="72" rx="9"/><text class="glyph" x="15" y="42">${icon(e.kind)}</text><text class="kind" x="45" y="23">${esc(e.kind.toUpperCase())}</text><text class="name" x="45" y="44">${esc(e.name.length > 19 ? e.name.slice(0, 18) + "…" : e.name)}</text>${n.children ? `<g class="fold" data-fold="${esc(e.id)}"><rect x="173" y="10" width="19" height="19" rx="4" fill="#edf3e7"/><text x="178" y="24">${view.collapsed.includes(e.id) ? "+" : "−"}</text></g><text class="kind" x="16" y="62">${n.children} ${view.collapsed.includes(e.id) ? "hidden" : "inside"}</text>` : ""}</g>`;
+  }
+  document.getElementById("scene")!.innerHTML = content;
+  applyCamera();
+}
+function renderTree() {
+  const query = $<HTMLInputElement>("search").value.toLowerCase();
+  let html = "";
+  function walk(parent: string | null, depth: number) {
+    for (const e of doc.entities.filter((e) => e.parent === parent)) {
+      const children = doc.entities.some((n) => n.parent === e.id);
+      if (!query || e.name.toLowerCase().includes(query))
+        html += `<div class="tree-row ${selected === e.id ? "selected" : ""}" data-select="${esc(e.id)}" style="padding-left:${depth * 13 + 3}px"><button data-fold="${esc(e.id)}" ${children ? "" : "disabled"} aria-label="Toggle ${esc(e.name)}">${children ? (view.collapsed.includes(e.id) ? "▸" : "▾") : "·"}</button><span class="kind-icon">${icon(e.kind)}</span><span>${esc(e.name)}</span></div>`;
+      if (!view.collapsed.includes(e.id) || query) walk(e.id, depth + 1);
+    }
+  }
+  walk(null, 0);
+  $("tree").innerHTML = html;
+}
+function renderLayers() {
+  $("layers").innerHTML = doc.layers
+    .map(
+      (l) =>
+        `<label class="layer"><span class="swatch" style="background:${esc(l.color)}"></span><span>${esc(l.name)}</span><small>${doc.connections.filter((c) => c.layer === l.id).length}</small><input type="checkbox" data-layer="${esc(l.id)}" aria-label="${esc(l.name)} layer" ${view.hidden_layers.includes(l.id) ? "" : "checked"}></label>`,
+    )
+    .join("");
+}
+function renderInspector() {
+  const e = doc.entities.find((e) => e.id === selected);
+  if (!e) {
+    $("inspector").innerHTML =
+      '<span class="eyebrow">DETAILS</span><h2>Every thing has a place.</h2><p class="muted">Select a card to inspect it.</p>';
+    return;
+  }
+  const descendants = new Set([e.id]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const n of doc.entities)
+      if (n.parent && descendants.has(n.parent) && !descendants.has(n.id)) {
+        descendants.add(n.id);
+        changed = true;
+      }
+  }
+  $("inspector").innerHTML =
+    `<span class="eyebrow">SELECTED ${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${doc.connections.filter((c) => c.endpoints.some((ep) => ep.entity === e.id)).length} connections · ${doc.entities.filter((n) => n.parent === e.id).length} children</p>${e.links.map((l) => `<div class="external-link"><b>${esc(l.provider.replaceAll("_", " ").toUpperCase())} · ${esc(l.kind)}</b>${esc(l.external_id)}</div>`).join("")}${
+      writable
+        ? `<form id="entity-form"><label class="field">Name<input name="name" value="${esc(e.name)}" required maxlength="150"></label><label class="field">Type<select name="kind">${["space", "device", "equipment", "service"].map((k) => `<option ${k === e.kind ? "selected" : ""}>${k}</option>`).join("")}</select></label><label class="field">Parent<select name="parent"><option value="">Top level</option>${doc.entities
+            .filter((n) => !descendants.has(n.id))
+            .map(
+              (n) =>
+                `<option value="${esc(n.id)}" ${e.parent === n.id ? "selected" : ""}>${esc(n.name)}</option>`,
+            )
+            .join(
+              "",
+            )}</select></label><div class="button-row"><button>Apply</button><button type="button" id="delete-entity" class="danger">Delete${descendants.size > 1 ? ` (${descendants.size})` : ""}</button></div></form><form id="connect-form" class="connect-form"><h3>Connect this thing</h3><label class="field">Connection name<input name="name" required placeholder="e.g. Office power"></label><label class="field">Layer<select name="layer">${doc.layers.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("")}</select></label><label class="field">Other endpoints<select name="targets" multiple required size="4">${doc.entities
+            .filter((n) => n.id !== e.id)
+            .map((n) => `<option value="${esc(n.id)}">${esc(n.name)}</option>`)
+            .join(
+              "",
+            )}</select></label><label class="field">Direction<select name="directed"><option value="yes">From this thing → targets</option><option value="no">Undirected peers</option></select></label><button>Add connection</button></form>`
+        : '<p class="muted">Move cards, fold spaces, and explore layers freely.</p>'
+    }`;
+  const entityForm = $<HTMLFormElement>("entity-form");
+  if (entityForm)
+    entityForm.onsubmit = (event) => {
+      event.preventDefault();
+      const f = new FormData(entityForm);
+      const name = String(f.get("name")).trim();
+      if (!name) {
+        status("An entity needs a name", true);
+        return;
+      }
+      e.name = name;
+      e.kind = String(f.get("kind"));
+      e.parent = String(f.get("parent")) || null;
+      markDirty();
+    };
+  const connect = $<HTMLFormElement>("connect-form");
+  if (connect)
+    connect.onsubmit = (event) => {
+      event.preventDefault();
+      const f = new FormData(connect);
+      const directed = f.get("directed") === "yes";
+      doc.connections.push({
+        id: crypto.randomUUID(),
+        name: String(f.get("name")),
+        layer: String(f.get("layer")),
+        endpoints: [
+          { entity: e.id, role: directed ? "source" : "peer" },
+          ...f
+            .getAll("targets")
+            .map((id) => ({
+              entity: String(id),
+              role: (directed ? "target" : "peer") as Role,
+            })),
+        ],
+      });
+      markDirty();
+    };
+  const del = $("delete-entity");
+  if (del)
+    del.onclick = () => {
+      doc.entities = doc.entities.filter((n) => !descendants.has(n.id));
+      doc.connections = doc.connections
+        .map((c) => ({
+          ...c,
+          endpoints: c.endpoints.filter((ep) => !descendants.has(ep.entity)),
+        }))
+        .filter((c) => c.endpoints.length >= 2);
+      selected = "";
+      markDirty();
+    };
+}
+function markDirty() {
+  dirty = true;
+  render();
+  status("Unsaved inventory changes");
+}
+function fold(id: string) {
+  view.collapsed = view.collapsed.includes(id)
+    ? view.collapsed.filter((v) => v !== id)
+    : [...view.collapsed, id];
+  render();
+}
+function applyCamera() {
+  document
+    .getElementById("scene")!
+    .setAttribute(
+      "transform",
+      `translate(${camera.x},${camera.y}) scale(${camera.scale})`,
+    );
+  $("zoom").textContent = `${Math.round(camera.scale * 100)}%`;
+}
+function fit() {
+  const box = $("canvas").getBoundingClientRect();
+  const ps = [
+    ...current.nodes.flatMap((n) => [
+      n.position,
+      { x: n.position.x + 200, y: n.position.y + 72 },
+    ]),
+    ...current.bundles.flatMap((b) => [
+      b.junction,
+      ...b.branches.flatMap((branch) => branch.points),
+    ]),
+  ];
+  if (!ps.length) return;
+  const minX = Math.min(...ps.map((p) => p.x)) - 40,
+    minY = Math.min(...ps.map((p) => p.y)) - 40;
+  const maxX = Math.max(...ps.map((p) => p.x)) + 40,
+    maxY = Math.max(...ps.map((p) => p.y)) + 80;
+  camera.scale = Math.min(
+    1.2,
+    (box.width - 30) / (maxX - minX),
+    (box.height - 40) / (maxY - minY),
+  );
+  camera.x =
+    (box.width - (maxX - minX) * camera.scale) / 2 - minX * camera.scale;
+  camera.y = 20 - minY * camera.scale;
+  applyCamera();
+}
+function zoom(mult: number, x?: number, y?: number) {
+  const r = svg.getBoundingClientRect();
+  x ??= r.width / 2;
+  y ??= r.height / 2;
+  const scale = Math.max(0.15, Math.min(2.5, camera.scale * mult));
+  const ratio = scale / camera.scale;
+  camera.x = x - (x - camera.x) * ratio;
+  camera.y = y - (y - camera.y) * ratio;
+  camera.scale = scale;
+  applyCamera();
+}
+let drag: { id: string | null; start: Point; origin: Point } | null = null;
+svg.addEventListener("pointerdown", (ev) => {
+  const target = ev.target as Element;
+  const foldTarget = target.closest("[data-fold]");
+  if (foldTarget) {
+    fold(foldTarget.getAttribute("data-fold")!);
+    return;
+  }
+  const id = target.closest("[data-id]")?.getAttribute("data-id") || null;
+  const r = svg.getBoundingClientRect();
+  if (id) {
+    selected = id;
+    renderTree();
+    renderInspector();
+  }
+  drag = {
+    id,
+    start: { x: ev.clientX - r.left, y: ev.clientY - r.top },
+    origin: id ? { ...view.positions[id] } : { x: camera.x, y: camera.y },
+  };
+  svg.setPointerCapture(ev.pointerId);
+  renderScene();
+});
+svg.addEventListener("pointermove", (ev) => {
+  if (!drag) return;
+  const r = svg.getBoundingClientRect();
+  const dx = ev.clientX - r.left - drag.start.x,
+    dy = ev.clientY - r.top - drag.start.y;
+  if (drag.id) {
+    view.positions[drag.id] = {
+      x: drag.origin.x + dx / camera.scale,
+      y: drag.origin.y + dy / camera.scale,
+    };
+    computeLayout();
+    renderScene();
+  } else {
+    camera.x = drag.origin.x + dx;
+    camera.y = drag.origin.y + dy;
+    applyCamera();
+  }
+});
+svg.addEventListener("pointerup", () => {
+  drag = null;
+});
+svg.addEventListener("pointercancel", () => {
+  drag = null;
+});
+svg.addEventListener("dblclick", (ev) => {
+  const id = (ev.target as Element)
+    .closest("[data-id]")
+    ?.getAttribute("data-id");
+  if (id) fold(id);
+});
+svg.addEventListener(
+  "wheel",
+  (ev) => {
+    ev.preventDefault();
+    const r = svg.getBoundingClientRect();
+    zoom(
+      Math.exp(-ev.deltaY * 0.0015),
+      ev.clientX - r.left,
+      ev.clientY - r.top,
+    );
+  },
+  { passive: false },
+);
+$("tree").onclick = (ev) => {
+  const t = ev.target as Element;
+  const f = t.closest("[data-fold]");
+  if (f) {
+    fold(f.getAttribute("data-fold")!);
+    return;
+  }
+  const row = t.closest("[data-select]");
+  if (row) {
+    selected = row.getAttribute("data-select")!;
+    render();
+  }
+};
+$("layers").onchange = (ev) => {
+  const t = ev.target as HTMLInputElement;
+  const id = t.dataset.layer!;
+  view.hidden_layers = t.checked
+    ? view.hidden_layers.filter((l) => l !== id)
+    : [...view.hidden_layers, id];
+  render();
+};
+$("search").oninput = renderTree;
+$("fit").onclick = fit;
+$("zoom-in").onclick = () => zoom(1.2);
+$("zoom-out").onclick = () => zoom(1 / 1.2);
+$("add").onclick = () => {
+  if (!writable) return;
+  const id = crypto.randomUUID();
+  doc.entities.push({
+    id,
+    name: "New thing",
+    kind: "device",
+    parent: selected || null,
+    links: [],
+  });
+  if (selected) view.collapsed = view.collapsed.filter((i) => i !== selected);
+  selected = id;
+  markDirty();
+  $<HTMLInputElement>("entity-form")
+    ?.querySelector<HTMLInputElement>("input")
+    ?.select();
+};
+$("save-document").onclick = run(async () => {
+  const result = await api("document", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ revision, document: doc }),
+  });
+  revision = result.revision;
+  dirty = false;
+  render();
+  status("Inventory saved to SQLite");
+});
+function updateViews() {
+  $("views").innerHTML =
+    '<option value="">Unsaved view</option>' +
+    savedViews
+      .map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`)
+      .join("");
+}
+$("views").onchange = () => {
+  const v = savedViews.find(
+    (v) => v.id === $<HTMLSelectElement>("views").value,
+  );
+  if (v) {
+    view = structuredClone(v.view);
+    render();
+    fit();
+    status(`Loaded ${v.name}`);
+  }
+};
+$("save-view").onclick = () => {
+  const selectedView = savedViews.find(
+    (v) => v.id === $<HTMLSelectElement>("views").value,
+  );
+  $<HTMLInputElement>("view-name").value = selectedView?.name || "";
+  $<HTMLDialogElement>("view-dialog").showModal();
+};
+$("cancel-view").onclick = () => $<HTMLDialogElement>("view-dialog").close();
+$("view-form").onsubmit = (ev) => {
+  ev.preventDefault();
+  run(async () => {
+    const existing = savedViews.find(
+      (v) => v.id === $<HTMLSelectElement>("views").value,
+    );
+    const saved = {
+      id: existing?.id || crypto.randomUUID(),
+      name: $<HTMLInputElement>("view-name").value,
+      view,
+    };
+    await api("views", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(saved),
+    });
+    savedViews = await api("views");
+    updateViews();
+    $<HTMLSelectElement>("views").value = saved.id;
+    $<HTMLDialogElement>("view-dialog").close();
+    status("View saved to SQLite");
+  })();
+};
+$("export").onclick = () => {
+  const clone = document.documentElement.cloneNode(true) as HTMLElement;
+  clone.querySelector("#snapshot")!.textContent = JSON.stringify({
+    document: doc,
+    view,
+  }).replaceAll("<", "\\u003c");
+  clone
+    .querySelectorAll("dialog[open]")
+    .forEach((d) => d.removeAttribute("open"));
+  const blob = new Blob(["<!doctype html>\n", clone.outerHTML], {
+    type: "text/html",
+  });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "stufftracker-view.html";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  status("Exported self-contained viewer");
+};
+window.addEventListener("beforeunload", (ev) => {
+  if (dirty) {
+    ev.preventDefault();
+    ev.returnValue = "";
+  }
+});
+async function start() {
+  await init({
+    module_or_path: Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0)),
+  });
+  const snapshot = JSON.parse($("snapshot").textContent || "null");
+  if (snapshot) {
+    offline = true;
+    doc = snapshot.document;
+    view = snapshot.view;
+    $("mode").textContent = "Interactive snapshot · No server required";
+  } else {
+    const data = await api("document");
+    doc = data.document;
+    revision = data.revision;
+    writable = (await api("session")).writable;
+    savedViews = await api("views");
+  }
+  $<HTMLButtonElement>("add").disabled = !writable;
+  $<HTMLButtonElement>("save-view").disabled = !writable;
+  $<HTMLSelectElement>("views").disabled = offline;
+  $("save-document").hidden = !writable;
+  updateViews();
+  render();
+  status(
+    offline
+      ? "Offline viewer · Rust/WASM engine"
+      : `Rust/WASM engine · ${writable ? "SQLite connected" : "Read-only share"}`,
+  );
+}
+run(start)();

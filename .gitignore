@@ -1,0 +1,7 @@
+/target/
+/node_modules/
+/dist/
+/web/pkg/
+/work/
+/img.tar
+/data/

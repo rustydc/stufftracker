@@ -1,0 +1,16 @@
+id: stufftracker
+name: StuffTracker
+version: 0.1.0
+# One grain = one inventory. Read shares may explore and export a snapshot;
+# write shares may edit inventory and save views. HTTP enforces these rights.
+rights: [read, write]
+runtime:
+  type: image
+  image: "darude.local/stufftracker"
+  archive: "img.tar"
+  command: ["/stufftracker"]
+routes:
+  - path: /
+    type: http
+# HTTP-only grain: socket binding signals readiness, after SQLite migrations.
+# No ambient network access or Home Assistant credentials are required.
