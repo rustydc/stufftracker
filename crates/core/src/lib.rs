@@ -100,6 +100,7 @@ pub struct Bundle {
 #[derive(Serialize, Deserialize)]
 pub struct Layout {
     pub layout_version: u32,
+    pub unrouted_connections: Vec<String>,
     pub nodes: Vec<Node>,
     pub bundles: Vec<Bundle>,
     pub positions: BTreeMap<String, Point>,
@@ -435,12 +436,14 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
             .or_default()
             .push(c.id.clone());
     }
-    let router = HierarchyRouter {
-        document: doc,
-        nodes: &nodes,
-    };
+    let mut reserved = Vec::new();
     let mut bundles = Vec::new();
     for (channel, ((layer, eps), connections)) in groups.into_iter().enumerate() {
+        let router = HierarchyRouter {
+            document: doc,
+            nodes: &nodes,
+            tracks: &reserved,
+        };
         let first_path = router.ancestors(&eps[0].0);
         let common = first_path
             .iter()
@@ -481,7 +484,7 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
                 gates.insert(ancestor, gate);
             }
         }
-        let branches = eps
+        let mut branches: Vec<Branch> = eps
             .into_iter()
             .map(|(id, role)| {
                 let points = router.branch(&id, common, junction, &gates);
@@ -492,6 +495,23 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
                 }
             })
             .collect();
+        // Do not display a partial hyperedge as though it were complete. Keep
+        // hard spacing when a corridor is full and report the missing connection.
+        if branches.iter().any(|branch| branch.points.is_empty()) {
+            for branch in &mut branches {
+                branch.points.clear();
+            }
+        }
+        // Reserve complete bundles only: their own branches may share trunks,
+        // but every subsequent connection must use a distinct parallel track.
+        for branch in &branches {
+            for pair in branch.points.windows(2) {
+                let segment = Track::new(pair[0], pair[1]);
+                if segment.a != segment.b && !reserved.contains(&segment) {
+                    reserved.push(segment);
+                }
+            }
+        }
         bundles.push(Bundle {
             layer,
             connections,
@@ -499,8 +519,14 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
             junction,
         });
     }
+    let unrouted_connections = bundles
+        .iter()
+        .filter(|b| b.branches.iter().any(|branch| branch.points.is_empty()))
+        .flat_map(|b| b.connections.clone())
+        .collect();
     Ok(Layout {
         layout_version: 2,
+        unrouted_connections,
         nodes,
         bundles,
         positions,
@@ -513,6 +539,68 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
 struct HierarchyRouter<'a> {
     document: &'a Document,
     nodes: &'a [Node],
+    tracks: &'a [Track],
+}
+/// Centerline separation between independent parallel runs. With a 2-unit
+/// stroke this leaves 8 units of visible padding. Opposing flows share the same
+/// geometric rule; deliberately bundled branches are reserved as one connection.
+pub const TRACK_SPACING: f64 = 10.;
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Track {
+    a: Point,
+    b: Point,
+}
+impl Track {
+    fn new(a: Point, b: Point) -> Self {
+        if a.x > b.x || (a.x == b.x && a.y > b.y) {
+            Self { a: b, b: a }
+        } else {
+            Self { a, b }
+        }
+    }
+    fn horizontal(&self) -> bool {
+        self.a.y == self.b.y
+    }
+    fn distance_to(&self, p: Point) -> f64 {
+        if self.horizontal() {
+            (p.y - self.a.y).abs() + (self.a.x - p.x).max(0.) + (p.x - self.b.x).max(0.)
+        } else {
+            (p.x - self.a.x).abs() + (self.a.y - p.y).max(0.) + (p.y - self.b.y).max(0.)
+        }
+    }
+}
+fn track_conflict(a: Point, b: Point, tracks: &[Track]) -> bool {
+    let current = Track::new(a, b);
+    if a == b {
+        return false;
+    }
+    tracks.iter().any(|t| {
+        if current.horizontal() != t.horizontal() {
+            return false;
+        }
+        if current.horizontal() {
+            (current.a.y - t.a.y).abs() < TRACK_SPACING - 1e-6
+                && current.a.x.max(t.a.x) < current.b.x.min(t.b.x) - 1e-6
+        } else {
+            (current.a.x - t.a.x).abs() < TRACK_SPACING - 1e-6
+                && current.a.y.max(t.a.y) < current.b.y.min(t.b.y) - 1e-6
+        }
+    })
+}
+fn point_clear(p: Point, tracks: &[Track]) -> bool {
+    tracks
+        .iter()
+        .all(|t| t.distance_to(p) >= TRACK_SPACING - 1e-6)
+}
+fn offsets(center: f64, min: f64, max: f64) -> Vec<f64> {
+    let mut result = Vec::new();
+    for i in [0., -1., 1., -2., 2., -3., 3., -4., 4.] {
+        let p = (center + i * TRACK_SPACING).clamp(min, max);
+        if !result.contains(&p) {
+            result.push(p);
+        }
+    }
+    result
 }
 #[derive(Clone, Copy)]
 struct Gate {
@@ -618,12 +706,30 @@ impl HierarchyRouter<'_> {
             xs.extend([b.position.x + 12., b.position.x + b.width - 12.]);
             ys.extend([b.position.y + 4., b.position.y + b.height - 12.]);
         }
+        for track in self.tracks {
+            if track.horizontal() {
+                ys.extend([track.a.y - TRACK_SPACING, track.a.y + TRACK_SPACING]);
+                xs.extend([track.a.x, track.b.x]);
+            } else {
+                xs.extend([track.a.x - TRACK_SPACING, track.a.x + TRACK_SPACING]);
+                ys.extend([track.a.y, track.b.y]);
+            }
+        }
+        if let Some(b) = bounds {
+            xs.retain(|x| *x >= b.position.x && *x <= b.position.x + b.width);
+            ys.retain(|y| *y >= b.position.y && *y <= b.position.y + b.height);
+        }
+        xs.sort_by(f64::total_cmp);
+        xs.dedup();
+        ys.sort_by(f64::total_cmp);
+        ys.dedup();
         let mut best = None;
         for x in &xs {
             for y in &ys {
                 let p = Point { x: *x, y: *y };
                 if bounds.is_some_and(|b| !in_bounds(p, b))
                     || rects.iter().any(|r| r.contains(p, 8.))
+                    || !point_clear(p, self.tracks)
                 {
                     continue;
                 }
@@ -659,12 +765,13 @@ impl HierarchyRouter<'_> {
         let left = n.position.x;
         let right = n.position.x + n.width;
         let mut candidates = Vec::new();
-        for y in [
-            junction.y.clamp(top, bottom),
-            median.y.clamp(top, bottom),
-            top,
-            bottom,
-        ] {
+        let mut ys = Vec::new();
+        for y in [junction.y, median.y, top, bottom] {
+            ys.extend(offsets(y, top, bottom));
+        }
+        ys.sort_by(f64::total_cmp);
+        ys.dedup();
+        for y in ys {
             for (x, normal) in [(left, -1.), (right, 1.)] {
                 candidates.push(Gate {
                     inside: Point {
@@ -679,8 +786,13 @@ impl HierarchyRouter<'_> {
                 });
             }
         }
+        let mut xs = Vec::new();
         for x in [junction.x, median.x, (left + right) / 2.] {
-            let x = x.clamp(left + 12., right - 12.);
+            xs.extend(offsets(x, left + 12., right - 12.));
+        }
+        xs.sort_by(f64::total_cmp);
+        xs.dedup();
+        for x in xs {
             let y = n.position.y + n.height;
             candidates.push(Gate {
                 inside: Point { x, y: y - 12. },
@@ -688,32 +800,54 @@ impl HierarchyRouter<'_> {
                 outside: Point { x, y: y + 12. },
             });
         }
-        candidates
+        let mut candidates: Vec<_> = candidates
             .into_iter()
             .filter(|g| {
                 self.bounds(Some(id)).is_none_or(|b| in_bounds(g.inside, b))
                     && self.bounds(parent).is_none_or(|b| in_bounds(g.outside, b))
                     && !inside_rects.iter().any(|r| r.contains(g.inside, 8.))
                     && !outside_rects.iter().any(|r| r.contains(g.outside, 8.))
+                    && point_clear(g.boundary, self.tracks)
+                    && !track_conflict(g.inside, g.outside, self.tracks)
             })
-            .filter_map(|gate| {
-                let path = self.segment(gate.outside, junction, parent);
-                if path.is_empty() {
-                    return None;
-                }
-                let cost = members
+            .map(|gate| {
+                let inside_cost = members
                     .iter()
                     .map(|p| distance(*p, gate.inside))
-                    .sum::<f64>()
-                    + path.windows(2).map(|p| distance(p[0], p[1])).sum::<f64>()
-                    + path.len() as f64 * 28.;
-                Some((cost, gate))
+                    .sum::<f64>();
+                let bound = inside_cost
+                    + distance(gate.outside, junction)
+                    + if gate.outside == junction { 28. } else { 56. };
+                (bound, inside_cost, gate)
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, gate)| gate)
+            .collect();
+        candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut best: Option<(f64, Gate)> = None;
+        for (bound, inside_cost, gate) in candidates {
+            if best.as_ref().is_some_and(|(cost, _)| bound >= *cost) {
+                break;
+            }
+            let path = self.segment(gate.outside, junction, parent);
+            if path.is_empty() {
+                continue;
+            }
+            let cost = inside_cost
+                + path.windows(2).map(|p| distance(p[0], p[1])).sum::<f64>()
+                + path.len() as f64 * 28.;
+            if best.as_ref().is_none_or(|(previous, _)| cost < *previous) {
+                best = Some((cost, gate));
+            }
+        }
+        best.map(|(_, gate)| gate)
     }
     fn segment(&self, start: Point, end: Point, domain: Option<&str>) -> Vec<Point> {
-        route(start, end, &self.obstacles(domain), self.bounds(domain))
+        route(
+            start,
+            end,
+            &self.obstacles(domain),
+            self.bounds(domain),
+            self.tracks,
+        )
     }
     fn branch(
         &self,
@@ -735,50 +869,73 @@ impl HierarchyRouter<'_> {
             .map(|id| gates[id].inside)
             .unwrap_or(junction);
         let n = self.node(id);
-        let y = self.center(id).y;
-        let mut ports = vec![
-            (
-                Point { x: n.position.x, y },
-                Point {
-                    x: n.position.x - 12.,
-                    y,
-                },
-            ),
-            (
-                Point {
-                    x: n.position.x + n.width,
-                    y,
-                },
-                Point {
-                    x: n.position.x + n.width + 12.,
-                    y,
-                },
-            ),
-        ];
-        if !n.container || n.collapsed {
-            let x = n.position.x + n.width / 2.;
+        let mut ports = Vec::new();
+        let mid_y = self.center(id).y;
+        let (min_y, max_y) = if n.container && !n.collapsed {
+            (n.position.y + 12., n.position.y + 40.)
+        } else {
+            (n.position.y + 12., n.position.y + n.height - 12.)
+        };
+        for y in offsets(mid_y, min_y, max_y) {
             ports.extend([
                 (
-                    Point { x, y: n.position.y },
+                    Point { x: n.position.x, y },
                     Point {
-                        x,
-                        y: n.position.y - 12.,
+                        x: n.position.x - 12.,
+                        y,
                     },
                 ),
                 (
                     Point {
-                        x,
-                        y: n.position.y + n.height,
+                        x: n.position.x + n.width,
+                        y,
                     },
                     Point {
-                        x,
-                        y: n.position.y + n.height + 12.,
+                        x: n.position.x + n.width + 12.,
+                        y,
                     },
                 ),
             ]);
         }
+        if !n.container || n.collapsed {
+            for x in offsets(
+                n.position.x + n.width / 2.,
+                n.position.x + 16.,
+                n.position.x + n.width - 16.,
+            ) {
+                ports.extend([
+                    (
+                        Point { x, y: n.position.y },
+                        Point {
+                            x,
+                            y: n.position.y - 12.,
+                        },
+                    ),
+                    (
+                        Point {
+                            x,
+                            y: n.position.y + n.height,
+                        },
+                        Point {
+                            x,
+                            y: n.position.y + n.height + 12.,
+                        },
+                    ),
+                ]);
+            }
+        }
+        ports.sort_by(|a, b| distance(a.1, first).total_cmp(&distance(b.1, first)));
         let mut best: Option<(f64, Vec<Point>)> = None;
         for (port, lead) in ports {
+            if !point_clear(port, self.tracks) || track_conflict(port, lead, self.tracks) {
+                continue;
+            }
+            if best
+                .as_ref()
+                .is_some_and(|(cost, _)| distance(port, first) + 56. >= *cost)
+            {
+                continue;
+            }
             let part = self.segment(lead, first, self.parent(id));
             if part.is_empty() {
                 continue;
@@ -902,15 +1059,81 @@ fn blocked(a: Point, b: Point, rects: &[Rect]) -> bool {
     })
 }
 /// Rectilinear visibility grid + Dijkstra with a bend penalty. Obstacles are cards.
-fn route(start: Point, end: Point, rects: &[Rect], bounds: Option<Rect>) -> Vec<Point> {
+fn route(
+    start: Point,
+    end: Point,
+    rects: &[Rect],
+    bounds: Option<Rect>,
+    tracks: &[Track],
+) -> Vec<Point> {
     if bounds.is_some_and(|b| !in_bounds(start, b) || !in_bounds(end, b)) {
         return Vec::new();
     }
+    // A clear L is already Manhattan-shortest with the minimum bend count.
+    // Avoid constructing a visibility grid for the common straight/L cases.
+    for elbow in [
+        Point {
+            x: end.x,
+            y: start.y,
+        },
+        Point {
+            x: start.x,
+            y: end.y,
+        },
+    ] {
+        let path = simplify(vec![start, elbow, end]);
+        if path
+            .windows(2)
+            .all(|p| !blocked(p[0], p[1], rects) && !track_conflict(p[0], p[1], tracks))
+        {
+            return path;
+        }
+    }
+    let relevant: Vec<_> = tracks
+        .iter()
+        .filter(|track| {
+            !bounds.is_some_and(|b| {
+                track.b.x + TRACK_SPACING < b.position.x
+                    || track.a.x - TRACK_SPACING > b.position.x + b.width
+                    || track.a.y.min(track.b.y) - TRACK_SPACING > b.position.y + b.height
+                    || track.a.y.max(track.b.y) + TRACK_SPACING < b.position.y
+            })
+        })
+        .copied()
+        .collect();
+    let tracks = &relevant[..];
     let mut xs = vec![start.x, end.x];
     let mut ys = vec![start.y, end.y];
     for r in rects {
         xs.extend([r.position.x - 12., r.position.x + r.width + 12.]);
         ys.extend([r.position.y - 12., r.position.y + r.height + 12.]);
+    }
+    for track in tracks {
+        if bounds.is_some_and(|b| {
+            track.b.x + TRACK_SPACING < b.position.x
+                || track.a.x - TRACK_SPACING > b.position.x + b.width
+                || track.a.y.min(track.b.y) - TRACK_SPACING > b.position.y + b.height
+                || track.a.y.max(track.b.y) + TRACK_SPACING < b.position.y
+        }) {
+            continue;
+        }
+        if track.horizontal() {
+            ys.extend([track.a.y - TRACK_SPACING, track.a.y + TRACK_SPACING]);
+            xs.extend([
+                track.a.x - TRACK_SPACING,
+                track.a.x,
+                track.b.x,
+                track.b.x + TRACK_SPACING,
+            ]);
+        } else {
+            xs.extend([track.a.x - TRACK_SPACING, track.a.x + TRACK_SPACING]);
+            ys.extend([
+                track.a.y - TRACK_SPACING,
+                track.a.y,
+                track.b.y,
+                track.b.y + TRACK_SPACING,
+            ]);
+        }
     }
     if let Some(b) = bounds {
         xs.extend([b.position.x, b.position.x + b.width]);
@@ -965,7 +1188,7 @@ fn route(start: Point, end: Point, rects: &[Rect], bounds: Option<Rect>) -> Vec<
         for (j, d) in neighbors {
             let a = point(i);
             let b = point(j);
-            if blocked(a, b, rects) {
+            if blocked(a, b, rects) || track_conflict(a, b, tracks) {
                 continue;
             }
             let c = cost
@@ -1018,6 +1241,208 @@ pub fn sample() -> Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn assert_track_spacing(result: &Layout) {
+        for (i, a) in result.bundles.iter().enumerate() {
+            assert!(
+                a.branches.iter().all(|b| !b.points.is_empty()),
+                "unrouted {:?}",
+                a.connections
+            );
+            let tracks: Vec<_> = a
+                .branches
+                .iter()
+                .flat_map(|branch| {
+                    branch
+                        .points
+                        .windows(2)
+                        .map(|pair| Track::new(pair[0], pair[1]))
+                })
+                .collect();
+            for b in &result.bundles[i + 1..] {
+                for branch in &b.branches {
+                    for pair in branch.points.windows(2) {
+                        assert!(
+                            !track_conflict(pair[0], pair[1], &tracks),
+                            "parallel overlap between {:?} and {:?}: {:?}",
+                            a.connections,
+                            b.connections,
+                            pair
+                        );
+                    }
+                }
+            }
+            for b in &result.bundles[i + 1..] {
+                for aa in &a.branches {
+                    for bb in &b.branches {
+                        if aa.entity == bb.entity {
+                            assert!(
+                                distance(aa.points[0], bb.points[0]) >= TRACK_SPACING - 1e-6,
+                                "shared port on {}",
+                                aa.entity
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn independent_connections_reserve_parallel_tracks_and_ports() {
+        let doc = sample();
+        let initial = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: View::default(),
+        })
+        .unwrap();
+        assert_track_spacing(&initial);
+        for (dx, dy, collapsed) in [(0., 24., false), (20., 20., false), (0., 0., true)] {
+            let mut view = View {
+                layout_version: 2,
+                positions: initial.positions.clone(),
+                ..View::default()
+            };
+            let p = view.positions.get_mut("kitchen").unwrap();
+            p.x += dx;
+            p.y += dy;
+            if collapsed {
+                view.collapsed.insert("kitchen".into());
+            }
+            assert_track_spacing(
+                &layout(&LayoutRequest {
+                    document: doc.clone(),
+                    view,
+                })
+                .unwrap(),
+            );
+        }
+    }
+    #[test]
+    fn crowded_connections_between_the_same_devices_get_distinct_lanes() {
+        let mut doc = sample();
+        doc.entities
+            .retain(|e| ["house", "panel", "lamp"].contains(&e.id.as_str()));
+        for e in &mut doc.entities {
+            if e.id != "house" {
+                e.parent = Some("house".into());
+            }
+        }
+        doc.connections.clear();
+        for layer in &doc.layers {
+            doc.connections.push(Connection {
+                id: layer.id.clone(),
+                name: layer.name.clone(),
+                layer: layer.id.clone(),
+                endpoints: vec![
+                    Endpoint {
+                        entity: "panel".into(),
+                        role: Role::Source,
+                    },
+                    Endpoint {
+                        entity: "lamp".into(),
+                        role: Role::Target,
+                    },
+                ],
+            });
+        }
+        let result = layout(&LayoutRequest {
+            document: doc,
+            view: View::default(),
+        })
+        .unwrap();
+        assert_eq!(result.bundles.len(), 4);
+        assert_track_spacing(&result);
+    }
+    #[test]
+    fn exhausted_corridors_report_connections_instead_of_overlapping() {
+        let mut doc = sample();
+        doc.entities
+            .retain(|e| ["house", "panel", "lamp"].contains(&e.id.as_str()));
+        for e in &mut doc.entities {
+            if e.id != "house" {
+                e.parent = Some("house".into());
+            }
+        }
+        doc.layers = (0..16)
+            .map(|i| Layer {
+                id: format!("run-{i}"),
+                name: format!("Run {i}"),
+                color: "#123456".into(),
+            })
+            .collect();
+        doc.connections = doc
+            .layers
+            .iter()
+            .map(|layer| Connection {
+                id: layer.id.clone(),
+                name: layer.name.clone(),
+                layer: layer.id.clone(),
+                endpoints: vec![
+                    Endpoint {
+                        entity: "panel".into(),
+                        role: Role::Source,
+                    },
+                    Endpoint {
+                        entity: "lamp".into(),
+                        role: Role::Target,
+                    },
+                ],
+            })
+            .collect();
+        let result = layout(&LayoutRequest {
+            document: doc,
+            view: View::default(),
+        })
+        .unwrap();
+        assert!(!result.unrouted_connections.is_empty());
+        let mut tracks = Vec::new();
+        for bundle in &result.bundles {
+            let reported = bundle
+                .connections
+                .iter()
+                .all(|id| result.unrouted_connections.contains(id));
+            assert!(
+                bundle
+                    .branches
+                    .iter()
+                    .all(|b| b.points.is_empty() == reported)
+            );
+            for branch in &bundle.branches {
+                for pair in branch.points.windows(2) {
+                    assert!(!track_conflict(pair[0], pair[1], &tracks));
+                }
+            }
+            for branch in &bundle.branches {
+                tracks.extend(branch.points.windows(2).map(|p| Track::new(p[0], p[1])));
+            }
+        }
+    }
+    #[test]
+    fn tracks_allow_crossings_but_reject_parallel_runs_without_padding() {
+        let tracks = [Track::new(
+            Point { x: 0., y: 10. },
+            Point { x: 100., y: 10. },
+        )];
+        assert!(track_conflict(
+            Point { x: 80., y: 10. },
+            Point { x: 20., y: 10. },
+            &tracks
+        ));
+        assert!(track_conflict(
+            Point { x: 20., y: 19. },
+            Point { x: 80., y: 19. },
+            &tracks
+        ));
+        assert!(!track_conflict(
+            Point { x: 20., y: 20. },
+            Point { x: 80., y: 20. },
+            &tracks
+        ));
+        assert!(!track_conflict(
+            Point { x: 50., y: 0. },
+            Point { x: 50., y: 30. },
+            &tracks
+        ));
+    }
     fn visits(path: &[Point], rect: Rect) -> Vec<(f64, f64)> {
         let mut intervals: Vec<(f64, f64)> = Vec::new();
         let mut offset = 0.;
@@ -1124,6 +1549,7 @@ mod tests {
             let router = HierarchyRouter {
                 document: &doc,
                 nodes: &result.nodes,
+                tracks: &[],
             };
             for bundle in &result.bundles {
                 for branch in &bundle.branches {
@@ -1411,6 +1837,7 @@ mod tests {
             Point { x: 400., y: 36. },
             &rects,
             None,
+            &[],
         );
         assert!(path.len() >= 4);
         for p in path.windows(2) {

@@ -28,6 +28,7 @@ type View = {
 };
 type Layout = {
   layout_version: number;
+  unrouted_connections: string[];
   positions: Record<string, Point>;
   nodes: {
     id: string;
@@ -100,8 +101,7 @@ function render() {
   renderTree();
   renderLayers();
   renderInspector();
-  $("counts").textContent =
-    `${current.nodes.length} of ${doc.entities.length} things · ${current.bundles.length} visible connections`;
+
   $<HTMLButtonElement>("save-document").disabled = !writable || !dirty;
   if (first) {
     first = false;
@@ -142,6 +142,13 @@ function renderScene() {
   }
   document.getElementById("scene")!.innerHTML = content;
   applyCamera();
+  const missing = current.unrouted_connections.length;
+  const routed = current.bundles.filter((b) =>
+    b.branches.every((branch) => branch.points.length),
+  ).length;
+  $("counts").textContent =
+    `${current.nodes.length} of ${doc.entities.length} things · ${routed} visible connections${missing ? ` · ${missing} need more routing space` : ""}`;
+  $("counts").classList.toggle("error", missing > 0);
 }
 function renderTree() {
   const query = $<HTMLInputElement>("search").value.toLowerCase();

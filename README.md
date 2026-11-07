@@ -100,12 +100,20 @@ child boxes as solid obstacles. A connection crosses each ancestor through a sha
 boundary gateway, then continues through the containing space. Unrelated rooms
 cannot become shortcuts, and branches cannot leave and re-enter an endpoint room.
 Junctions are selected in nearby common-space corridors rather than at the far
-edge of the floor. Room-local branches share the same gateway. Moving a card
+edge of the floor. Room-local branches share the same gateway. Independent connections reserve separate tracks with a 10-unit
+centerline gap (8 units of padding around 2-unit strokes). Device ports and room
+gateways use separate attachment positions. Parallel runs in either flow direction
+respect this spacing; right-angle crossings remain allowed. Branches of the same
+bundled connection may intentionally share trunks. Reservations affect routes,
+not entity positions. If a corridor cannot fit a complete connection with the
+required spacing, the layout reports it in `unrouted_connections` and the viewer
+shows a “need more routing space” count instead of drawing overlapping or partial
+connections. Moving a card
 recomputes routes without relaying out neighbors. This is a starting engine,
 not a full hierarchical channel router: partial-route trunk bundling across different connections, incremental route
 caching and manual waypoints are future work.
-Overlapping cards can make ports unroutable; those branches are omitted rather
-than drawn through obstacles. Prototype limits are 500 entities/2,000 connections;
+Overlapping cards or congested corridors can make a connection unroutable; it is
+reported rather than drawn through obstacles or without the required padding. Prototype limits are 500 entities/2,000 connections;
 performance at those limits is not yet established.
 
 | Endpoint               | Behavior                                                                     |

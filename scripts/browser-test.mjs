@@ -134,6 +134,51 @@ try {
     })
   ).json();
   assert.equal(native.nodes.length, 17);
+  assert.deepEqual(native.unrouted_connections, []);
+  const activeView = (
+    await (await page.request.get(`${base}api/views`)).json()
+  ).find((v) => v.name === "Browser test perspective").view;
+  const rendered = await (
+    await page.request.post(`${base}api/layout`, {
+      data: { document: snapshot.document, view: activeView },
+    })
+  ).json();
+  const expectedPaths = rendered.bundles.flatMap((b) =>
+    b.branches
+      .filter((branch) => branch.points.length)
+      .map((branch) =>
+        branch.points.map((p, i) => `${i ? "L" : "M"}${p.x},${p.y}`).join(" "),
+      ),
+  );
+  assert.deepEqual(
+    await page
+      .locator("path.route")
+      .evaluateAll((paths) => paths.map((p) => p.getAttribute("d"))),
+    expectedPaths,
+  );
+  const segments = (b) =>
+    b.branches.flatMap((branch) =>
+      branch.points.slice(1).map((p, i) => [branch.points[i], p]),
+    );
+  for (let i = 0; i < rendered.bundles.length; i++)
+    for (let j = i + 1; j < rendered.bundles.length; j++)
+      for (const [a, b] of segments(rendered.bundles[i]))
+        for (const [c, d] of segments(rendered.bundles[j])) {
+          if (
+            a.y === b.y &&
+            c.y === d.y &&
+            Math.max(Math.min(a.x, b.x), Math.min(c.x, d.x)) <
+              Math.min(Math.max(a.x, b.x), Math.max(c.x, d.x)) - 1e-6
+          )
+            assert(Math.abs(a.y - c.y) >= 10 - 1e-6);
+          if (
+            a.x === b.x &&
+            c.x === d.x &&
+            Math.max(Math.min(a.y, b.y), Math.min(c.y, d.y)) <
+              Math.min(Math.max(a.y, b.y), Math.max(c.y, d.y)) - 1e-6
+          )
+            assert(Math.abs(a.x - c.x) >= 10 - 1e-6);
+        }
   for (const n of native.nodes) {
     const wasm = nested[n.id];
     assert.deepEqual(
