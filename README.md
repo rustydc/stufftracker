@@ -31,7 +31,10 @@ automation. Subsequent boots preserve your data.
 
 ## Explore and edit
 
-- Drag cards to move them; drag the canvas to pan; scroll to zoom; **Fit all** reframes.
+- Spaces are nested boxes: a house contains floors, floors contain rooms, and rooms
+  contain devices. Drag a space header to move its entire subtree, or drag a device
+  within its parent. Drag empty canvas/space interiors to pan; scroll to zoom;
+  **Fit all** reframes.
 - Click a card or a tree row to inspect it. Use a space's +/− button or double-click
   its card to collapse/expand. Collapse and layer toggles preserve all positions.
 - Toggle power, network, water, and automation layers independently.
@@ -86,12 +89,17 @@ can represent richer relationships. Each connection belongs to a layer.
 
 The projection replaces hidden endpoints with visible collapsed ancestors and
 bundles connections with identical visible endpoint/role sets and layer. Each
-bundle routes branches to a shared junction. Orthogonal paths use a rectilinear
+bundle routes branches to a shared junction inside the endpoints’ common ancestor. Orthogonal paths use a rectilinear
 visibility grid and Dijkstra search with a bend penalty around card rectangles.
-Positions are allocated once and retained for hidden entities. Moving a card
+Positions are parent-relative offsets, allocated once and retained for hidden
+entities. Rust computes nested container sizes and absolute frames, and clamps
+dragging to the parent’s content area. Moving a space translates all descendants
+without rewriting their offsets. Collapse retains expanded sibling slots so
+neighbors stay fixed. Expanded container headers, devices, and collapsed spaces
+are routing obstacles; routes can cross expanded space boundaries. Moving a card
 recomputes routes without relaying out neighbors. This is a starting engine,
-not a full hierarchical channel router: partial-route trunk bundling, compound
-space boundaries, incremental route caching and manual waypoints are future work.
+not a full hierarchical channel router: partial-route trunk bundling, explicit boundary gateways, incremental route
+caching and manual waypoints are future work.
 Overlapping cards can make ports unroutable; those branches are omitted rather
 than drawn through obstacles. Prototype limits are 500 entities/2,000 connections;
 performance at those limits is not yet established.
@@ -110,13 +118,16 @@ SQLite uses WAL and a transaction for inventory writes. Schema v1 separates
 entities, connections, layers, views, and the document revision. Entity/connection
 payloads are JSON within those tables so model changes can evolve independently.
 Concurrent inventory editors use revision checks; saved views currently use
-last-write-wins.
+last-write-wins. View layout version 2 stores parent-relative positions. Earlier
+flat views rebuild coordinates once while retaining their collapse and layer
+choices; saving the view persists the migrated geometry.
 
 ## Validation
 
 ```sh
 npm run build
 npm run check
+npm run export:sample
 cargo test --workspace
 cargo fmt --all -- --check
 # With a disposable sample server running (browser tests edit its inventory):
@@ -140,3 +151,9 @@ integration are intentionally deferred.
 socket, checking readiness, share permissions, revision conflicts, saved views,
 and state persistence across a stop/start. Full Darude sandbox/hibernation tests
 require a running platform and are not covered by this process-level check.
+
+`npm run export:sample` generates `work/sample-viewer.html` from the current
+build and the sample inventory. It is a self-contained stateless viewer with the
+nested-space layout. `POST api/move` accepts `{document, view, entity, position}`
+and returns a view with a parent-constrained move, using the same Rust operation
+as browser dragging; `position` is in world coordinates.

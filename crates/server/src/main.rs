@@ -186,6 +186,11 @@ async fn layout(Json(r): Json<LayoutRequest>) -> Result<Json<stufftracker_core::
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
+async fn move_node(Json(r): Json<stufftracker_core::MoveRequest>) -> Result<Json<View>, Error> {
+    stufftracker_core::move_entity(&r)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
 fn router(a: App) -> Router {
     Router::new()
         .route(
@@ -196,6 +201,7 @@ fn router(a: App) -> Router {
         .route("/api/views", get(views).post(save_view))
         .route("/api/views/{id}", axum::routing::delete(delete_view))
         .route("/api/layout", post(layout))
+        .route("/api/move", post(move_node))
         .route(
             "/api/session",
             get(|State(a): State<App>, h: HeaderMap| async move {

@@ -32,6 +32,57 @@ try {
           ns.map((n) => [n.dataset.id, n.getAttribute("transform")]),
         ),
       );
+  const geometry = async () =>
+    page.locator(".node").evaluateAll((ns) =>
+      Object.fromEntries(
+        ns.map((n) => {
+          const [x, y] = n
+            .getAttribute("transform")
+            .match(/-?[\d.]+/g)
+            .map(Number);
+          return [
+            n.dataset.id,
+            {
+              x,
+              y,
+              width: Number(n.dataset.width),
+              height: Number(n.dataset.height),
+              parent: n.dataset.parent,
+            },
+          ];
+        }),
+      ),
+    );
+  const nested = await geometry();
+  assert.equal(await page.locator(".space").count(), 7);
+  for (const n of Object.values(nested))
+    if (n.parent) {
+      const p = nested[n.parent];
+      assert(
+        n.x >= p.x &&
+          n.y >= p.y + 52 &&
+          n.x + n.width <= p.x + p.width &&
+          n.y + n.height <= p.y + p.height,
+      );
+    }
+  const kitchenHeader = await page
+    .locator('.space[data-id="kitchen"] .space-header')
+    .boundingBox();
+  await page.mouse.move(kitchenHeader.x + 80, kitchenHeader.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(kitchenHeader.x + 88, kitchenHeader.y + 28, {
+    steps: 3,
+  });
+  await page.mouse.up();
+  const grouped = await geometry();
+  const dx = grouped.kitchen.x - nested.kitchen.x,
+    dy = grouped.kitchen.y - nested.kitchen.y;
+  assert(dx > 0 && dy > 0);
+  for (const id of Object.keys(nested)) {
+    const member = ["kitchen", "lamp", "sensor", "tap"].includes(id);
+    assert(Math.abs(grouped[id].x - nested[id].x - (member ? dx : 0)) < 0.001);
+    assert(Math.abs(grouped[id].y - nested[id].y - (member ? dy : 0)) < 0.001);
+  }
   const before = await transforms();
   await page.locator('.tree-row [data-fold="kitchen"]').click();
   assert.equal(await page.locator('.node[data-id="lamp"]').count(), 0);
@@ -83,6 +134,13 @@ try {
     })
   ).json();
   assert.equal(native.nodes.length, 17);
+  for (const n of native.nodes) {
+    const wasm = nested[n.id];
+    assert.deepEqual(
+      [n.position.x, n.position.y, n.width, n.height],
+      [wasm.x, wasm.y, wasm.width, wasm.height],
+    );
+  }
   assert(
     native.bundles.some(
       (b) => b.branches.filter((p) => p.role === "target").length > 1,
@@ -153,6 +211,22 @@ try {
     document.querySelector("#status").textContent.includes("Offline viewer"),
   );
   assert.equal(await exported.locator(".node").count(), 17);
+  const rootHeader = await exported
+    .locator('.space[data-id="house"] .space-header')
+    .boundingBox();
+  const oldRoot = await exported
+    .locator('.space[data-id="house"]')
+    .getAttribute("transform");
+  await exported.mouse.move(rootHeader.x + 80, rootHeader.y + 18);
+  await exported.mouse.down();
+  await exported.mouse.move(rootHeader.x + 100, rootHeader.y + 28, {
+    steps: 2,
+  });
+  await exported.mouse.up();
+  assert.notEqual(
+    await exported.locator('.space[data-id="house"]').getAttribute("transform"),
+    oldRoot,
+  );
   await exported.locator('.tree-row [data-fold="kitchen"]').click();
   assert.equal(await exported.locator('.node[data-id="lamp"]').count(), 0);
   await exported

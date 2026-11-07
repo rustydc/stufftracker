@@ -425,11 +425,45 @@ h2 {
   stroke-linejoin: round;
   stroke-linecap: round;
 }
-.hierarchy {
+.space {
+  cursor: default;
+}
+.space .space-body {
+  stroke: #b7cbaa;
+  stroke-width: 1.4;
+}
+.space.selected .space-body {
+  stroke: #4d8b5b;
+  stroke-width: 2;
+}
+.space-header {
+  cursor: grab;
+}
+.space-divider {
   fill: none;
-  stroke: #d3decd;
-  stroke-width: 1.2;
-  stroke-dasharray: 4 5;
+  stroke: #d5e1cb;
+  stroke-width: 1;
+}
+.space .fold rect {
+  fill: #ffffffa8;
+}
+.space .glyph {
+  font-size: 20px;
+}
+.space .kind {
+  font-size: 8px;
+  letter-spacing: 1.2px;
+}
+.space .name {
+  font-size: 14px;
+}
+.space-count {
+  font-size: 9px;
+  fill: #809672;
+}
+.collapsed-space .card {
+  fill: #edf4e6 !important;
+  stroke: #99b68a !important;
 }
 .junction {
   stroke: white;

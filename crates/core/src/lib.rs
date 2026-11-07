@@ -56,6 +56,9 @@ pub struct Point {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct View {
+    /// Version 2 stores positions relative to the immediate parent.
+    #[serde(default)]
+    pub layout_version: u32,
     #[serde(default)]
     pub positions: BTreeMap<String, Point>,
     #[serde(default)]
@@ -73,6 +76,13 @@ pub struct Node {
     pub id: String,
     pub position: Point,
     pub children: usize,
+    pub width: f64,
+    pub height: f64,
+    pub expanded_width: f64,
+    pub expanded_height: f64,
+    pub depth: usize,
+    pub container: bool,
+    pub collapsed: bool,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Branch {
@@ -89,6 +99,7 @@ pub struct Bundle {
 }
 #[derive(Serialize, Deserialize)]
 pub struct Layout {
+    pub layout_version: u32,
     pub nodes: Vec<Node>,
     pub bundles: Vec<Bundle>,
     pub positions: BTreeMap<String, Point>,
@@ -155,51 +166,235 @@ pub fn validate(doc: &Document) -> Result<(), String> {
     Ok(())
 }
 
-pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
-    validate(&req.document)?;
-    if req
-        .view
+const PADDING: f64 = 24.;
+const CONTENT_Y: f64 = 76.;
+const GAP: f64 = 32.;
+const CARD_WIDTH: f64 = 200.;
+const CARD_HEIGHT: f64 = 72.;
+
+#[derive(Clone, Copy, Debug)]
+struct Size {
+    width: f64,
+    height: f64,
+}
+#[derive(Clone, Copy, Debug)]
+struct Rect {
+    position: Point,
+    width: f64,
+    height: f64,
+}
+impl Rect {
+    fn contains(&self, p: Point, pad: f64) -> bool {
+        p.x > self.position.x - pad
+            && p.x < self.position.x + self.width + pad
+            && p.y > self.position.y - pad
+            && p.y < self.position.y + self.height + pad
+    }
+}
+fn validate_view(view: &View) -> Result<(), String> {
+    if view
         .positions
         .values()
         .any(|p| !p.x.is_finite() || !p.y.is_finite() || p.x.abs() > 1e6 || p.y.abs() > 1e6)
     {
         return Err("Invalid coordinates".into());
     }
-    let doc = &req.document;
-    let view = &req.view;
-    let mut positions = view.positions.clone();
-    // Allocate all nodes before projection. Collapse/filters therefore never shift neighbors.
-    fn place(
-        parent: Option<&str>,
-        depth: usize,
-        doc: &Document,
-        positions: &mut BTreeMap<String, Point>,
-        rows: &mut BTreeMap<usize, usize>,
-    ) {
-        for e in doc
-            .entities
-            .iter()
-            .filter(|e| e.parent.as_deref() == parent)
-        {
-            let row = rows.entry(depth).or_default();
-            let mut p = Point {
-                x: 60. + depth as f64 * 280.,
-                y: 60. + *row as f64 * 116.,
-            };
-            if !positions.contains_key(&e.id) {
-                while positions
-                    .values()
-                    .any(|q| (q.x - p.x).abs() < 200. && (q.y - p.y).abs() < 90.)
-                {
-                    p.y += 116.;
-                }
-                positions.insert(e.id.clone(), p);
-            }
-            *row += 1;
-            place(Some(&e.id), depth + 1, doc, positions, rows);
+    Ok(())
+}
+
+/// Measure the full hierarchy before applying collapse. Sibling slots remain
+/// reserved, so folding a room never moves another room or loses hidden offsets.
+fn measure(
+    id: &str,
+    depth: usize,
+    doc: &Document,
+    positions: &mut BTreeMap<String, Point>,
+    sizes: &mut BTreeMap<String, Size>,
+) -> Size {
+    let entity = doc.entities.iter().find(|e| e.id == id).unwrap();
+    let children: Vec<_> = doc
+        .entities
+        .iter()
+        .filter(|e| e.parent.as_deref() == Some(id))
+        .collect();
+    if children.is_empty() && entity.kind != "space" {
+        let size = Size {
+            width: CARD_WIDTH,
+            height: CARD_HEIGHT,
+        };
+        sizes.insert(id.into(), size);
+        return size;
+    }
+    let child_sizes: Vec<_> = children
+        .iter()
+        .map(|e| measure(&e.id, depth + 1, doc, positions, sizes))
+        .collect();
+    let has_containers = children.iter().any(|e| {
+        e.kind == "space"
+            || doc
+                .entities
+                .iter()
+                .any(|c| c.parent.as_deref() == Some(&e.id))
+    });
+    let columns = if depth == 0 {
+        1
+    } else if has_containers {
+        children.len().clamp(1, 3)
+    } else if children.len() > 5 {
+        2
+    } else {
+        1
+    };
+    let mut widths = vec![0_f64; columns];
+    let mut heights = vec![0_f64; children.len().div_ceil(columns)];
+    for (i, size) in child_sizes.iter().enumerate() {
+        widths[i % columns] = widths[i % columns].max(size.width);
+        heights[i / columns] = heights[i / columns].max(size.height);
+    }
+    let mut extent = Size {
+        width: 272.,
+        height: 148.,
+    };
+    let mut occupied: Vec<Rect> = Vec::new();
+    // Reserve existing children before placing newly added entities.
+    for (e, size) in children.iter().zip(&child_sizes) {
+        if let Some(p) = positions.get_mut(&e.id) {
+            p.x = p.x.max(PADDING);
+            p.y = p.y.max(CONTENT_Y);
+            occupied.push(Rect {
+                position: *p,
+                width: size.width,
+                height: size.height,
+            });
         }
     }
-    place(None, 0, doc, &mut positions, &mut BTreeMap::new());
+    for (i, (e, size)) in children.iter().zip(&child_sizes).enumerate() {
+        let mut position = Point {
+            x: PADDING + widths[..i % columns].iter().map(|w| w + GAP).sum::<f64>(),
+            y: CONTENT_Y + heights[..i / columns].iter().map(|h| h + GAP).sum::<f64>(),
+        };
+        if let Some(p) = positions.get(&e.id) {
+            position = *p;
+        } else {
+            while occupied.iter().any(|r| {
+                position.x < r.position.x + r.width + 16.
+                    && position.x + size.width + 16. > r.position.x
+                    && position.y < r.position.y + r.height + 16.
+                    && position.y + size.height + 16. > r.position.y
+            }) {
+                position.y += size.height + GAP;
+            }
+            occupied.push(Rect {
+                position,
+                width: size.width,
+                height: size.height,
+            });
+            positions.insert(e.id.clone(), position);
+        }
+        extent.width = extent.width.max(position.x + size.width + PADDING);
+        extent.height = extent.height.max(position.y + size.height + PADDING);
+    }
+    // Keep the initial expanded footprint when a child is dragged inward.
+    extent.width = extent
+        .width
+        .max(PADDING * 2. + widths.iter().sum::<f64>() + GAP * (columns - 1) as f64);
+    extent.height = extent.height.max(
+        CONTENT_Y
+            + heights.iter().sum::<f64>()
+            + GAP * heights.len().saturating_sub(1) as f64
+            + PADDING,
+    );
+    sizes.insert(id.into(), extent);
+    extent
+}
+
+pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
+    validate(&req.document)?;
+    validate_view(&req.view)?;
+    let doc = &req.document;
+    let view = &req.view;
+    // Old flat-card coordinates cannot describe containment. Rebuild their
+    // geometry once; keep the view's fold/layer choices and the inventory.
+    let mut positions = if view.layout_version >= 2 {
+        view.positions.clone()
+    } else {
+        BTreeMap::new()
+    };
+    positions.retain(|id, _| doc.entities.iter().any(|e| &e.id == id));
+    let mut sizes = BTreeMap::new();
+    let roots: Vec<_> = doc.entities.iter().filter(|e| e.parent.is_none()).collect();
+    let mut root_y = 40.;
+    for root in &roots {
+        let size = measure(&root.id, 0, doc, &mut positions, &mut sizes);
+        let p = positions
+            .entry(root.id.clone())
+            .or_insert(Point { x: 40., y: root_y });
+        root_y = p.y + size.height + GAP;
+    }
+    fn collect(
+        id: &str,
+        origin: Point,
+        depth: usize,
+        doc: &Document,
+        view: &View,
+        positions: &BTreeMap<String, Point>,
+        sizes: &BTreeMap<String, Size>,
+        nodes: &mut Vec<Node>,
+    ) {
+        let e = doc.entities.iter().find(|e| e.id == id).unwrap();
+        let local = positions[id];
+        let position = Point {
+            x: origin.x + local.x,
+            y: origin.y + local.y,
+        };
+        let children: Vec<_> = doc
+            .entities
+            .iter()
+            .filter(|e| e.parent.as_deref() == Some(id))
+            .collect();
+        let container = e.kind == "space" || !children.is_empty();
+        let collapsed = container && view.collapsed.contains(id);
+        let full = sizes[id];
+        nodes.push(Node {
+            id: id.into(),
+            position,
+            children: children.len(),
+            width: if collapsed { CARD_WIDTH } else { full.width },
+            height: if collapsed { CARD_HEIGHT } else { full.height },
+            expanded_width: full.width,
+            expanded_height: full.height,
+            depth,
+            container,
+            collapsed,
+        });
+        if !collapsed {
+            for child in children {
+                collect(
+                    &child.id,
+                    position,
+                    depth + 1,
+                    doc,
+                    view,
+                    positions,
+                    sizes,
+                    nodes,
+                );
+            }
+        }
+    }
+    let mut nodes = Vec::new();
+    for root in roots {
+        collect(
+            &root.id,
+            Point::default(),
+            0,
+            doc,
+            view,
+            &positions,
+            &sizes,
+            &mut nodes,
+        );
+    }
     let visible_ancestor = |id: &str| -> String {
         let mut result = id.to_string();
         let mut current = doc
@@ -219,21 +414,20 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
         }
         result
     };
-    let nodes: Vec<_> = doc
-        .entities
+    // Expanded space interiors are traversable. Headers, devices and collapsed
+    // spaces are obstacles; crossing a space boundary is allowed, never its title.
+    let obstacles: Vec<_> = nodes
         .iter()
-        .filter(|e| visible_ancestor(&e.id) == e.id)
-        .map(|e| Node {
-            id: e.id.clone(),
-            position: positions[&e.id],
-            children: doc
-                .entities
-                .iter()
-                .filter(|n| n.parent.as_deref() == Some(&e.id))
-                .count(),
+        .map(|n| Rect {
+            position: n.position,
+            width: n.width,
+            height: if n.container && !n.collapsed {
+                52.
+            } else {
+                n.height
+            },
         })
         .collect();
-    let obstacles: Vec<_> = nodes.iter().map(|n| n.position).collect();
     type Key = (String, Vec<(String, Role)>);
     let mut groups: BTreeMap<Key, Vec<String>> = BTreeMap::new();
     for c in &doc.connections {
@@ -255,47 +449,97 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
             .or_default()
             .push(c.id.clone());
     }
+    let node_for = |id: &str| nodes.iter().find(|n| n.id == id).unwrap();
+    let ancestors = |id: &str| {
+        let mut path = Vec::new();
+        let mut at = doc
+            .entities
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.parent.as_deref());
+        while let Some(id) = at {
+            path.push(id.to_string());
+            at = doc
+                .entities
+                .iter()
+                .find(|e| e.id == id)
+                .and_then(|e| e.parent.as_deref());
+        }
+        path
+    };
     let mut bundles = Vec::new();
     for (channel, ((layer, eps), connections)) in groups.into_iter().enumerate() {
-        let mut xs: Vec<_> = eps.iter().map(|(id, _)| positions[id].x + 100.).collect();
-        xs.sort_by(f64::total_cmp);
-        let mut ys: Vec<_> = eps.iter().map(|(id, _)| positions[id].y + 36.).collect();
+        let first_path = ancestors(&eps[0].0);
+        let common = first_path
+            .iter()
+            .find(|ancestor| eps.iter().all(|(id, _)| ancestors(id).contains(ancestor)))
+            .map(|id| node_for(id));
+        let mut ys: Vec<_> = eps
+            .iter()
+            .map(|(id, _)| {
+                let n = node_for(id);
+                n.position.y
+                    + if n.container && !n.collapsed {
+                        26.
+                    } else {
+                        36.
+                    }
+            })
+            .collect();
         ys.sort_by(f64::total_cmp);
-        let mut junction = Point {
-            x: xs[xs.len() - 1] + 140. + channel as f64 * 20.,
-            y: ys[ys.len() / 2],
+        let mut junction = if let Some(parent) = common {
+            Point {
+                x: parent.position.x + parent.width - 12. - (channel % 3) as f64 * 3.,
+                y: ys[ys.len() / 2],
+            }
+        } else {
+            Point {
+                x: eps
+                    .iter()
+                    .map(|(id, _)| {
+                        let n = node_for(id);
+                        n.position.x + n.width
+                    })
+                    .fold(f64::NEG_INFINITY, f64::max)
+                    + 40.
+                    + channel as f64 * 20.,
+                y: ys[ys.len() / 2],
+            }
         };
-        while obstacles.iter().any(|p| inside(junction, *p, 12.)) {
-            junction.x += 32.;
+        while obstacles.iter().any(|r| r.contains(junction, 8.)) {
+            junction.y += 16.;
         }
         let branches = eps
             .into_iter()
             .map(|(id, role)| {
-                let p = positions[&id];
+                let n = node_for(&id);
+                let center = n.position.x + n.width / 2.;
                 let start = Point {
-                    x: if junction.x >= p.x + 100. {
-                        p.x + 200.
+                    x: if junction.x >= center {
+                        n.position.x + n.width
                     } else {
-                        p.x
+                        n.position.x
                     },
-                    y: p.y + 36.,
+                    y: n.position.y
+                        + if n.container && !n.collapsed {
+                            26.
+                        } else {
+                            36.
+                        },
                 };
                 let lead = Point {
-                    x: start.x + if start.x > p.x { 16. } else { -16. },
+                    x: start.x + if junction.x >= center { 12. } else { -12. },
                     y: start.y,
                 };
-                // Prefer this bundle's own trunk lane, avoiding the visual lie of
-                // unrelated connections sharing the same vertical bus. Fall back
-                // to obstacle routing when a card obstructs the direct approach.
                 let elbow = Point {
                     x: junction.x,
                     y: lead.y,
                 };
                 let mut points =
                     if !blocked(lead, elbow, &obstacles) && !blocked(elbow, junction, &obstacles) {
-                        let mut path = vec![lead, elbow, junction];
-                        path.dedup();
-                        path
+                        let mut p = vec![lead, elbow, junction];
+                        p.dedup();
+                        p
                     } else {
                         route(lead, junction, &obstacles)
                     };
@@ -317,36 +561,96 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
         });
     }
     Ok(Layout {
+        layout_version: 2,
         nodes,
         bundles,
         positions,
     })
 }
-fn inside(p: Point, r: Point, pad: f64) -> bool {
-    p.x > r.x - pad && p.x < r.x + 200. + pad && p.y > r.y - pad && p.y < r.y + 72. + pad
+
+#[derive(Serialize, Deserialize)]
+pub struct MoveRequest {
+    pub document: Document,
+    pub view: View,
+    pub entity: String,
+    pub position: Point,
 }
-fn blocked(a: Point, b: Point, rects: &[Point]) -> bool {
+/// Move in world coordinates while retaining parent-relative offsets. Dragging
+/// a space moves its hidden and visible descendants without rewriting them.
+pub fn move_entity(req: &MoveRequest) -> Result<View, String> {
+    if !req.position.x.is_finite()
+        || !req.position.y.is_finite()
+        || req.position.x.abs() > 1e6
+        || req.position.y.abs() > 1e6
+    {
+        return Err("Invalid coordinates".into());
+    }
+    let layout = layout(&LayoutRequest {
+        document: req.document.clone(),
+        view: req.view.clone(),
+    })?;
+    let node = layout
+        .nodes
+        .iter()
+        .find(|n| n.id == req.entity)
+        .ok_or("Move a visible entity")?;
+    let e = req
+        .document
+        .entities
+        .iter()
+        .find(|e| e.id == req.entity)
+        .unwrap();
+    let mut p = req.position;
+    if let Some(parent) = &e.parent {
+        let parent = layout
+            .nodes
+            .iter()
+            .find(|n| &n.id == parent)
+            .ok_or("Parent is hidden")?;
+        p.x = (p.x - parent.position.x).clamp(
+            PADDING,
+            (parent.width - node.expanded_width - PADDING).max(PADDING),
+        );
+        p.y = (p.y - parent.position.y).clamp(
+            CONTENT_Y,
+            (parent.height - node.expanded_height - PADDING).max(CONTENT_Y),
+        );
+    }
+    let mut view = req.view.clone();
+    view.layout_version = 2;
+    view.positions = layout.positions;
+    view.positions.insert(req.entity.clone(), p);
+    Ok(view)
+}
+#[wasm_bindgen]
+pub fn move_node(input: &str) -> Result<String, JsError> {
+    let request: MoveRequest = serde_json::from_str(input)?;
+    let result = move_entity(&request).map_err(|e| JsError::new(&e))?;
+    Ok(serde_json::to_string(&result)?)
+}
+
+fn blocked(a: Point, b: Point, rects: &[Rect]) -> bool {
     rects.iter().any(|r| {
         if a.x == b.x {
-            a.x > r.x - 10.
-                && a.x < r.x + 210.
-                && a.y.min(b.y) < r.y + 82.
-                && a.y.max(b.y) > r.y - 10.
+            a.x > r.position.x - 8.
+                && a.x < r.position.x + r.width + 8.
+                && a.y.min(b.y) < r.position.y + r.height + 8.
+                && a.y.max(b.y) > r.position.y - 8.
         } else {
-            a.y > r.y - 10.
-                && a.y < r.y + 82.
-                && a.x.min(b.x) < r.x + 210.
-                && a.x.max(b.x) > r.x - 10.
+            a.y > r.position.y - 8.
+                && a.y < r.position.y + r.height + 8.
+                && a.x.min(b.x) < r.position.x + r.width + 8.
+                && a.x.max(b.x) > r.position.x - 8.
         }
     })
 }
 /// Rectilinear visibility grid + Dijkstra with a bend penalty. Obstacles are cards.
-fn route(start: Point, end: Point, rects: &[Point]) -> Vec<Point> {
+fn route(start: Point, end: Point, rects: &[Rect]) -> Vec<Point> {
     let mut xs = vec![start.x, end.x];
     let mut ys = vec![start.y, end.y];
     for r in rects {
-        xs.extend([r.x - 16., r.x + 216.]);
-        ys.extend([r.y - 16., r.y + 88.]);
+        xs.extend([r.position.x - 12., r.position.x + r.width + 12.]);
+        ys.extend([r.position.y - 12., r.position.y + r.height + 12.]);
     }
     xs.sort_by(f64::total_cmp);
     xs.dedup();
@@ -449,6 +753,122 @@ pub fn sample() -> Document {
 mod tests {
     use super::*;
     #[test]
+    fn hierarchy_is_contained_and_siblings_do_not_overlap() {
+        let doc = sample();
+        let result = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: View::default(),
+        })
+        .unwrap();
+        for node in &result.nodes {
+            let entity = doc.entities.iter().find(|e| e.id == node.id).unwrap();
+            if let Some(parent) = &entity.parent {
+                let parent = result.nodes.iter().find(|n| &n.id == parent).unwrap();
+                assert!(node.position.x >= parent.position.x + PADDING);
+                assert!(node.position.y >= parent.position.y + CONTENT_Y);
+                assert!(node.position.x + node.width <= parent.position.x + parent.width - PADDING);
+                assert!(
+                    node.position.y + node.height <= parent.position.y + parent.height - PADDING
+                );
+            }
+            for other in &result.nodes {
+                let other_entity = doc.entities.iter().find(|e| e.id == other.id).unwrap();
+                if node.id != other.id && entity.parent == other_entity.parent {
+                    assert!(
+                        node.position.x + node.width <= other.position.x
+                            || other.position.x + other.width <= node.position.x
+                            || node.position.y + node.height <= other.position.y
+                            || other.position.y + other.height <= node.position.y
+                    );
+                }
+            }
+        }
+        assert!(
+            result
+                .bundles
+                .iter()
+                .flat_map(|b| &b.branches)
+                .all(|b| !b.points.is_empty())
+        );
+    }
+    #[test]
+    fn moving_a_space_translates_its_subtree_and_clamps_to_parent() {
+        let doc = sample();
+        let first = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: View::default(),
+        })
+        .unwrap();
+        let view = View {
+            layout_version: 2,
+            positions: first.positions.clone(),
+            ..View::default()
+        };
+        let kitchen = first.nodes.iter().find(|n| n.id == "kitchen").unwrap();
+        let moved = move_entity(&MoveRequest {
+            document: doc.clone(),
+            view: view.clone(),
+            entity: "kitchen".into(),
+            position: Point {
+                x: kitchen.position.x + 20.,
+                y: kitchen.position.y + 20.,
+            },
+        })
+        .unwrap();
+        let result = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: moved.clone(),
+        })
+        .unwrap();
+        for node in &first.nodes {
+            let after = result.nodes.iter().find(|n| n.id == node.id).unwrap();
+            let delta = if ["kitchen", "lamp", "sensor", "tap"].contains(&node.id.as_str()) {
+                20.
+            } else {
+                0.
+            };
+            assert_eq!(
+                after.position,
+                Point {
+                    x: node.position.x + delta,
+                    y: node.position.y + delta
+                }
+            );
+        }
+        assert_eq!(moved.positions["lamp"], view.positions["lamp"]);
+        let clamped = move_entity(&MoveRequest {
+            document: doc.clone(),
+            view: moved,
+            entity: "lamp".into(),
+            position: Point { x: -999., y: -999. },
+        })
+        .unwrap();
+        assert_eq!(
+            clamped.positions["lamp"],
+            Point {
+                x: PADDING,
+                y: CONTENT_Y
+            }
+        );
+    }
+    #[test]
+    fn flat_views_migrate_without_losing_fold_or_layer_choices() {
+        let mut old = View::default();
+        old.positions
+            .insert("lamp".into(), Point { x: 9999., y: 9999. });
+        old.collapsed.insert("kitchen".into());
+        old.hidden_layers.insert("water".into());
+        let result = layout(&LayoutRequest {
+            document: sample(),
+            view: old,
+        })
+        .unwrap();
+        assert_eq!(result.layout_version, 2);
+        assert!(result.positions["lamp"].x < 9999.);
+        assert!(!result.nodes.iter().any(|n| n.id == "lamp"));
+        assert!(!result.bundles.iter().any(|b| b.layer == "water"));
+    }
+    #[test]
     fn parallel_connections_bundle_after_collapse_and_keep_roles() {
         let mut doc = sample();
         let mut duplicate = doc.connections[0].clone();
@@ -497,6 +917,7 @@ mod tests {
         })
         .unwrap();
         view.positions = first.positions.clone();
+        view.layout_version = 2;
         view.collapsed.insert("kitchen".into());
         let collapsed = layout(&LayoutRequest {
             document: doc.clone(),
@@ -534,7 +955,11 @@ mod tests {
     }
     #[test]
     fn routing_avoids_obstacles_and_is_orthogonal() {
-        let rects = [Point { x: 100., y: 0. }];
+        let rects = [Rect {
+            position: Point { x: 100., y: 0. },
+            width: 200.,
+            height: 72.,
+        }];
         let path = route(Point { x: 0., y: 36. }, Point { x: 400., y: 36. }, &rects);
         assert!(path.len() >= 4);
         for p in path.windows(2) {

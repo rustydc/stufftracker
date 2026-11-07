@@ -1,4 +1,4 @@
-import init, { compute } from "./pkg/stufftracker_core";
+import init, { compute, move_node } from "./pkg/stufftracker_core";
 declare const WASM_BASE64: string;
 type Point = { x: number; y: number };
 type Entity = {
@@ -21,13 +21,24 @@ type DocumentData = {
   layers: { id: string; name: string; color: string }[];
 };
 type View = {
+  layout_version?: number;
   positions: Record<string, Point>;
   collapsed: string[];
   hidden_layers: string[];
 };
 type Layout = {
+  layout_version: number;
   positions: Record<string, Point>;
-  nodes: { id: string; position: Point; children: number }[];
+  nodes: {
+    id: string;
+    position: Point;
+    children: number;
+    width: number;
+    height: number;
+    depth: number;
+    container: boolean;
+    collapsed: boolean;
+  }[];
   bundles: {
     layer: string;
     connections: string[];
@@ -81,6 +92,7 @@ function run(fn: () => unknown | Promise<unknown>) {
 function computeLayout() {
   current = JSON.parse(compute(JSON.stringify({ document: doc, view })));
   view.positions = current.positions;
+  view.layout_version = current.layout_version;
 }
 function render() {
   computeLayout();
@@ -97,18 +109,19 @@ function render() {
   }
 }
 function renderScene() {
-  const positions = new Map(current.nodes.map((n) => [n.id, n.position]));
   let content = "";
   for (const l of doc.layers) {
     content += `<defs><marker id="arrow-${esc(l.id)}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="${esc(l.color)}"/></marker></defs>`;
   }
-  for (const n of current.nodes) {
+  // Paint the containing spaces first, then routes, then device cards. Their
+  // world rectangles are supplied by Rust; the TypeScript shell does no layout.
+  for (const n of current.nodes
+    .filter((n) => n.container && !n.collapsed)
+    .sort((a, b) => a.depth - b.depth)) {
     const e = doc.entities.find((e) => e.id === n.id)!;
-    const p = e.parent && positions.get(e.parent);
-    if (p) {
-      const q = n.position;
-      content += `<path class="hierarchy" d="M${p.x + 200},${p.y + 36} H${p.x + 236} V${q.y + 36} H${q.x}"/>`;
-    }
+    const fills = ["#edf2e7", "#f5f8f0", "#fcfdf9"];
+    const headers = ["#e0ead9", "#e9f0e1", "#f0f5e9"];
+    content += `<g class="node space ${selected === n.id ? "selected" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="space-body" width="${n.width}" height="${n.height}" rx="12" fill="${fills[Math.min(n.depth, 2)]}"/><g class="space-header"><path d="M12 0 H${n.width - 12} Q${n.width} 0 ${n.width} 12 V52 H0 V12 Q0 0 12 0 Z" fill="${headers[Math.min(n.depth, 2)]}"/><path class="space-divider" d="M0 52 H${n.width}"/><text class="glyph" x="15" y="35">${icon(e.kind)}</text><text class="kind" x="43" y="18">${esc(e.kind.toUpperCase())}</text><text class="name" x="43" y="36">${esc(e.name)}</text><text class="space-count" x="${n.width - 50}" y="32" text-anchor="end">${n.children} inside</text>${n.children ? `<g class="fold" data-fold="${esc(n.id)}"><rect x="${n.width - 34}" y="16" width="20" height="20" rx="5"/><text x="${n.width - 29}" y="30">−</text></g>` : ""}</g></g>`;
   }
   for (const b of current.bundles) {
     const layer = doc.layers.find((l) => l.id === b.layer)!;
@@ -123,9 +136,9 @@ function renderScene() {
     if (b.connections.length > 1)
       content += `<text class="bundle-count" x="${b.junction.x + 7}" y="${b.junction.y - 7}">${b.connections.length} links</text>`;
   }
-  for (const n of current.nodes) {
+  for (const n of current.nodes.filter((n) => !n.container || n.collapsed)) {
     const e = doc.entities.find((e) => e.id === n.id)!;
-    content += `<g class="node ${selected === n.id ? "selected" : ""}" data-id="${esc(n.id)}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="200" height="72" rx="9"/><text class="glyph" x="15" y="42">${icon(e.kind)}</text><text class="kind" x="45" y="23">${esc(e.kind.toUpperCase())}</text><text class="name" x="45" y="44">${esc(e.name.length > 19 ? e.name.slice(0, 18) + "…" : e.name)}</text>${n.children ? `<g class="fold" data-fold="${esc(e.id)}"><rect x="173" y="10" width="19" height="19" rx="4" fill="#edf3e7"/><text x="178" y="24">${view.collapsed.includes(e.id) ? "+" : "−"}</text></g><text class="kind" x="16" y="62">${n.children} ${view.collapsed.includes(e.id) ? "hidden" : "inside"}</text>` : ""}</g>`;
+    content += `<g class="node ${n.collapsed ? "collapsed-space" : ""} ${selected === n.id ? "selected" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="${n.width}" height="${n.height}" rx="9"/><text class="glyph" x="15" y="42">${icon(e.kind)}</text><text class="kind" x="45" y="23">${esc(e.kind.toUpperCase())}</text><text class="name" x="45" y="44">${esc(e.name.length > 19 ? e.name.slice(0, 18) + "…" : e.name)}</text>${n.children ? `<g class="fold" data-fold="${esc(e.id)}"><rect x="173" y="10" width="19" height="19" rx="4" fill="#e2edd8"/><text x="178" y="24">+</text></g><text class="kind" x="16" y="62">${n.children} hidden inside</text>` : ""}</g>`;
   }
   document.getElementById("scene")!.innerHTML = content;
   applyCamera();
@@ -200,7 +213,9 @@ function renderInspector() {
       }
       e.name = name;
       e.kind = String(f.get("kind"));
-      e.parent = String(f.get("parent")) || null;
+      const parent = String(f.get("parent")) || null;
+      if (e.parent !== parent) delete view.positions[e.id];
+      e.parent = parent;
       markDirty();
     };
   const connect = $<HTMLFormElement>("connect-form");
@@ -215,12 +230,10 @@ function renderInspector() {
         layer: String(f.get("layer")),
         endpoints: [
           { entity: e.id, role: directed ? "source" : "peer" },
-          ...f
-            .getAll("targets")
-            .map((id) => ({
-              entity: String(id),
-              role: (directed ? "target" : "peer") as Role,
-            })),
+          ...f.getAll("targets").map((id) => ({
+            entity: String(id),
+            role: (directed ? "target" : "peer") as Role,
+          })),
         ],
       });
       markDirty();
@@ -264,7 +277,7 @@ function fit() {
   const ps = [
     ...current.nodes.flatMap((n) => [
       n.position,
-      { x: n.position.x + 200, y: n.position.y + 72 },
+      { x: n.position.x + n.width, y: n.position.y + n.height },
     ]),
     ...current.bundles.flatMap((b) => [
       b.junction,
@@ -305,20 +318,28 @@ svg.addEventListener("pointerdown", (ev) => {
     fold(foldTarget.getAttribute("data-fold")!);
     return;
   }
-  const id = target.closest("[data-id]")?.getAttribute("data-id") || null;
+  let id = target.closest("[data-id]")?.getAttribute("data-id") || null;
   const r = svg.getBoundingClientRect();
   if (id) {
     selected = id;
     renderTree();
     renderInspector();
+    document
+      .querySelectorAll(".node.selected")
+      .forEach((n) => n.classList.remove("selected"));
+    target.closest(".node")?.classList.add("selected");
+    const node = current.nodes.find((n) => n.id === id)!;
+    if (node.container && !node.collapsed && !target.closest(".space-header"))
+      id = null;
   }
   drag = {
     id,
     start: { x: ev.clientX - r.left, y: ev.clientY - r.top },
-    origin: id ? { ...view.positions[id] } : { x: camera.x, y: camera.y },
+    origin: id
+      ? { ...current.nodes.find((n) => n.id === id)!.position }
+      : { x: camera.x, y: camera.y },
   };
   svg.setPointerCapture(ev.pointerId);
-  renderScene();
 });
 svg.addEventListener("pointermove", (ev) => {
   if (!drag) return;
@@ -326,10 +347,19 @@ svg.addEventListener("pointermove", (ev) => {
   const dx = ev.clientX - r.left - drag.start.x,
     dy = ev.clientY - r.top - drag.start.y;
   if (drag.id) {
-    view.positions[drag.id] = {
-      x: drag.origin.x + dx / camera.scale,
-      y: drag.origin.y + dy / camera.scale,
-    };
+    view = JSON.parse(
+      move_node(
+        JSON.stringify({
+          document: doc,
+          view,
+          entity: drag.id,
+          position: {
+            x: drag.origin.x + dx / camera.scale,
+            y: drag.origin.y + dy / camera.scale,
+          },
+        }),
+      ),
+    );
     computeLayout();
     renderScene();
   } else {
