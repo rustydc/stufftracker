@@ -65,6 +65,8 @@ pub struct View {
     pub collapsed: BTreeSet<String>,
     #[serde(default)]
     pub hidden_layers: BTreeSet<String>,
+    #[serde(default)]
+    pub attachment_hints: BTreeMap<String, Point>,
 }
 #[derive(Serialize, Deserialize)]
 pub struct LayoutRequest {
@@ -101,6 +103,7 @@ pub struct Bundle {
 }
 #[derive(Serialize, Deserialize)]
 pub struct Layout {
+    pub attachment_hints: BTreeMap<String, Point>,
     pub layout_version: u32,
     pub unrouted_connections: Vec<String>,
     pub nodes: Vec<Node>,
@@ -198,6 +201,7 @@ fn validate_view(view: &View) -> Result<(), String> {
     if view
         .positions
         .values()
+        .chain(view.attachment_hints.values())
         .any(|p| !p.x.is_finite() || !p.y.is_finite() || p.x.abs() > 1e6 || p.y.abs() > 1e6)
     {
         return Err("Invalid coordinates".into());
@@ -297,16 +301,6 @@ fn measure(
         extent.width = extent.width.max(position.x + size.width + PADDING);
         extent.height = extent.height.max(position.y + size.height + PADDING);
     }
-    // Keep the initial expanded footprint when a child is dragged inward.
-    extent.width = extent
-        .width
-        .max(PADDING * 2. + widths.iter().sum::<f64>() + GAP * (columns - 1) as f64);
-    extent.height = extent.height.max(
-        CONTENT_Y
-            + heights.iter().sum::<f64>()
-            + GAP * heights.len().saturating_sub(1) as f64
-            + PADDING,
-    );
     sizes.insert(id.into(), extent);
     extent
 }
@@ -438,6 +432,7 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
             .or_default()
             .push(c.id.clone());
     }
+    let mut attachment_hints = view.attachment_hints.clone();
     let mut reserved = Vec::new();
     let mut bundles = Vec::new();
     for (channel, ((layer, eps), connections)) in groups.into_iter().enumerate() {
@@ -446,7 +441,14 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
             nodes: &nodes,
             tracks: &reserved,
             preferences: BTreeMap::new(),
+            attachments: BTreeMap::new(),
         };
+        let hint_prefix = format!("{}|", serde_json::to_string(&connections).unwrap());
+        router.attachments = view
+            .attachment_hints
+            .iter()
+            .filter_map(|(k, v)| k.strip_prefix(&hint_prefix).map(|k| (k.to_owned(), *v)))
+            .collect();
         let first_path = router.ancestors(&eps[0].0);
         let common = first_path
             .iter()
@@ -462,6 +464,42 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
         if branches.iter().any(|branch| branch.points.is_empty()) {
             for branch in &mut branches {
                 branch.points.clear();
+            }
+        }
+        for branch in &branches {
+            if let Some(port) = branch.points.first() {
+                let n = router.node(&branch.entity);
+                attachment_hints.insert(
+                    format!("{}port:{}", hint_prefix, branch.entity),
+                    Point {
+                        x: if port.x == n.position.x { -1. } else { 1. },
+                        y: port.y - n.position.y,
+                    },
+                );
+                for id in router
+                    .ancestors(&branch.entity)
+                    .iter()
+                    .take_while(|id| Some(id.as_str()) != common)
+                {
+                    let n = router.node(id);
+                    for pair in branch.points.windows(2).filter(|p| p[0].y == p[1].y) {
+                        for (x, side) in [(n.position.x, -1.), (n.position.x + n.width, 1.)] {
+                            if pair[0].x.min(pair[1].x) < x
+                                && pair[0].x.max(pair[1].x) > x
+                                && pair[0].y >= n.position.y + 60.
+                                && pair[0].y <= n.position.y + n.height
+                            {
+                                attachment_hints.insert(
+                                    format!("{}gate:{}", hint_prefix, id),
+                                    Point {
+                                        x: side,
+                                        y: pair[0].y - n.position.y,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         // Reserve complete bundles only: their own branches may share trunks,
@@ -499,6 +537,7 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
         .flat_map(|b| b.connections.clone())
         .collect();
     Ok(Layout {
+        attachment_hints,
         layout_version: 2,
         unrouted_connections,
         nodes,
@@ -515,6 +554,7 @@ struct HierarchyRouter<'a> {
     nodes: &'a [Node],
     tracks: &'a [Track],
     preferences: BTreeMap<String, Vec<f64>>,
+    attachments: BTreeMap<String, Point>,
 }
 /// Centerline separation between independent parallel runs. With a 2-unit
 /// stroke this leaves 8 units of visible padding. Opposing flows share the same
@@ -1005,6 +1045,7 @@ impl HierarchyRouter<'_> {
                 nodes: self.nodes,
                 tracks: self.tracks,
                 preferences: BTreeMap::new(),
+                attachments: self.attachments.clone(),
             };
             for point in fallback.junction_options(common, &centers, channel) {
                 let branches = fallback.via_junction(eps, common, point);
@@ -1201,6 +1242,12 @@ impl HierarchyRouter<'_> {
         }
         result
     }
+    fn attachment_penalty(&self, key: &str, n: &Node, p: Point) -> f64 {
+        self.attachments.get(key).map_or(0., |hint| {
+            let side = if p.x == n.position.x { -1. } else { 1. };
+            (if side != hint.x { 160. } else { 0. }) + (p.y - n.position.y - hint.y).abs() * 2.
+        })
+    }
     fn gate(&self, id: &str, junction: Point, members: &[Point]) -> Option<Gate> {
         let n = self.node(id);
         let parent = self.parent(id);
@@ -1222,6 +1269,9 @@ impl HierarchyRouter<'_> {
         let mut ys = Vec::new();
         for y in [junction.y, median.y, top, bottom] {
             ys.extend(offsets(y, top, bottom));
+        }
+        if let Some(hint) = self.attachments.get(&format!("gate:{id}")) {
+            ys.push((n.position.y + hint.y).clamp(top, bottom));
         }
         ys.sort_by(f64::total_cmp);
         ys.dedup();
@@ -1255,6 +1305,8 @@ impl HierarchyRouter<'_> {
                     .iter()
                     .map(|p| distance(*p, gate.inside))
                     .sum::<f64>();
+                let inside_cost =
+                    inside_cost + self.attachment_penalty(&format!("gate:{id}"), n, gate.boundary);
                 let bound = inside_cost
                     + distance(gate.outside, junction)
                     + if gate.outside == junction { 28. } else { 56. };
@@ -1315,7 +1367,11 @@ impl HierarchyRouter<'_> {
         } else {
             (n.position.y + 12., n.position.y + n.height - 12.)
         };
-        for y in offsets(mid_y, min_y, max_y) {
+        let mut ys = offsets(mid_y, min_y, max_y);
+        if let Some(hint) = self.attachments.get(&format!("port:{id}")) {
+            ys.insert(0, (n.position.y + hint.y).clamp(min_y, max_y));
+        }
+        for y in ys {
             ports.extend([
                 (
                     Point { x: n.position.x, y },
@@ -1355,7 +1411,8 @@ impl HierarchyRouter<'_> {
             let mut path = vec![port];
             path.extend(part);
             let path = simplify(path);
-            let score = routing_cost(&path, self.preferred(self.parent(id)));
+            let score = routing_cost(&path, self.preferred(self.parent(id)))
+                + self.attachment_penalty(&format!("port:{id}"), n, port);
             if best.as_ref().is_none_or(|(cost, _)| score < *cost) {
                 best = Some((score, path));
             }
@@ -2329,6 +2386,7 @@ mod tests {
                     nodes,
                     tracks: &[],
                     preferences: BTreeMap::new(),
+                    attachments: BTreeMap::new(),
                 };
                 router.plan_corridors(
                     Some("ground"),
@@ -2443,6 +2501,7 @@ mod tests {
             nodes: &result.nodes,
             tracks: &[],
             preferences: BTreeMap::new(),
+            attachments: BTreeMap::new(),
         };
         let make = |id: &str, points: &[(f64, f64)]| Branch {
             entity: id.into(),
@@ -2548,6 +2607,7 @@ mod tests {
             nodes: &result.nodes,
             tracks: &[],
             preferences: BTreeMap::new(),
+            attachments: BTreeMap::new(),
         };
         let path = router.straighten(&branch, Some("house"), &BTreeMap::new(), &[]);
         assert_eq!(
@@ -2586,6 +2646,7 @@ mod tests {
             nodes: &result.nodes,
             tracks: &tracks,
             preferences: BTreeMap::new(),
+            attachments: BTreeMap::new(),
         };
         let path = router.straighten(&branch, Some("house"), &BTreeMap::new(), &[]);
         assert!(path.len() > 3 && path.len() < branch.points.len());
@@ -2602,6 +2663,7 @@ mod tests {
             nodes: &result.nodes,
             tracks: &[],
             preferences: BTreeMap::new(),
+            attachments: BTreeMap::new(),
         };
         let office = router.node("office");
         let gate = Point {
@@ -2987,6 +3049,7 @@ mod tests {
                 nodes: &result.nodes,
                 tracks: &[],
                 preferences: BTreeMap::new(),
+                attachments: BTreeMap::new(),
             };
             for bundle in &result.bundles {
                 for branch in &bundle.branches {
@@ -3099,6 +3162,84 @@ mod tests {
                 .flat_map(|b| &b.branches)
                 .all(|b| !b.points.is_empty())
         );
+    }
+    #[test]
+    fn containers_shrink_after_a_child_returns_and_ports_resist_small_moves() {
+        let doc = sample();
+        let first = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: View::default(),
+        })
+        .unwrap();
+        let mut view = View {
+            layout_version: 2,
+            positions: first.positions.clone(),
+            attachment_hints: first.attachment_hints.clone(),
+            ..View::default()
+        };
+        let lamp = first.nodes.iter().find(|n| n.id == "lamp").unwrap();
+        for delta in [1., 2., 1., 0., -1., 0.] {
+            view = move_entity(&MoveRequest {
+                document: doc.clone(),
+                view,
+                entity: "lamp".into(),
+                position: Point {
+                    x: lamp.position.x + delta,
+                    y: lamp.position.y,
+                },
+            })
+            .unwrap();
+            let next = layout(&LayoutRequest {
+                document: doc.clone(),
+                view: view.clone(),
+            })
+            .unwrap();
+            assert!(next.unrouted_connections.is_empty());
+            for (key, hint) in &first.attachment_hints {
+                if key.contains("port:lamp") {
+                    assert_eq!(next.attachment_hints.get(key), Some(hint));
+                }
+            }
+            view.attachment_hints = next.attachment_hints;
+        }
+        view = move_entity(&MoveRequest {
+            document: doc.clone(),
+            view,
+            entity: "lamp".into(),
+            position: Point {
+                x: lamp.position.x + 500.,
+                y: lamp.position.y + 500.,
+            },
+        })
+        .unwrap();
+        let grown = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: view.clone(),
+        })
+        .unwrap();
+        view = move_entity(&MoveRequest {
+            document: doc.clone(),
+            view,
+            entity: "lamp".into(),
+            position: lamp.position,
+        })
+        .unwrap();
+        let restored = layout(&LayoutRequest {
+            document: doc,
+            view,
+        })
+        .unwrap();
+        for id in ["kitchen", "ground", "house"] {
+            if let Some(original) = first.nodes.iter().find(|n| n.id == id) {
+                let large = grown.nodes.iter().find(|n| n.id == id).unwrap();
+                let small = restored.nodes.iter().find(|n| n.id == id).unwrap();
+                assert!(large.width > original.width || large.height > original.height);
+                assert_eq!(
+                    (small.width, small.height),
+                    (original.width, original.height)
+                );
+            }
+        }
     }
     #[test]
     fn moving_a_space_translates_its_subtree_and_expands_parent() {

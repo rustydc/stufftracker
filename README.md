@@ -93,7 +93,8 @@ bundle routes branches to a shared junction inside the endpoints’ common ances
 visibility grid and Dijkstra search with a bend penalty around card rectangles.
 Positions are parent-relative offsets, allocated once and retained for hidden
 entities. Rust computes nested container sizes and absolute frames. Dragging beyond a
-parent grows its bounds, recursively expanding ancestors; dragging left or up
+parent grows its bounds, recursively expanding ancestors; bounds shrink again
+to the current contents when that space is no longer needed. Dragging left or up
 moves container origins while preserving sibling world positions. Moving a space translates all descendants
 without rewriting their offsets. Collapse retains expanded sibling slots so
 neighbors stay fixed. Routing follows the hierarchy one level at a time: each space treats its immediate
@@ -194,3 +195,8 @@ build and the sample inventory. It is a self-contained stateless viewer with the
 nested-space layout. `POST api/move` accepts `{document, view, entity, position}`
 and returns a view with a parent-constrained move, using the same Rust operation
 as browser dragging; `position` is in world coordinates.
+
+Routing retains per-connection attachment hints in saved views and offline exports.
+Previous device ports and space gateways receive a hysteresis preference during
+dragging, so nearly equal paths do not repeatedly swap attachment sides or slots.
+Obstacle clearance and wire spacing remain hard constraints.

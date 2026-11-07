@@ -21,12 +21,14 @@ type DocumentData = {
   layers: { id: string; name: string; color: string }[];
 };
 type View = {
+  attachment_hints?: Record<string, Point>;
   layout_version?: number;
   positions: Record<string, Point>;
   collapsed: string[];
   hidden_layers: string[];
 };
 type Layout = {
+  attachment_hints: Record<string, Point>;
   layout_version: number;
   unrouted_connections: string[];
   positions: Record<string, Point>;
@@ -93,6 +95,7 @@ function run(fn: () => unknown | Promise<unknown>) {
 }
 function computeLayout() {
   current = JSON.parse(compute(JSON.stringify({ document: doc, view })));
+  view.attachment_hints = current.attachment_hints;
   view.positions = current.positions;
   view.layout_version = current.layout_version;
 }
