@@ -95,10 +95,14 @@ Positions are parent-relative offsets, allocated once and retained for hidden
 entities. Rust computes nested container sizes and absolute frames, and clamps
 dragging to the parent’s content area. Moving a space translates all descendants
 without rewriting their offsets. Collapse retains expanded sibling slots so
-neighbors stay fixed. Expanded container headers, devices, and collapsed spaces
-are routing obstacles; routes can cross expanded space boundaries. Moving a card
+neighbors stay fixed. Routing follows the hierarchy one level at a time: each space treats its immediate
+child boxes as solid obstacles. A connection crosses each ancestor through a shared
+boundary gateway, then continues through the containing space. Unrelated rooms
+cannot become shortcuts, and branches cannot leave and re-enter an endpoint room.
+Junctions are selected in nearby common-space corridors rather than at the far
+edge of the floor. Room-local branches share the same gateway. Moving a card
 recomputes routes without relaying out neighbors. This is a starting engine,
-not a full hierarchical channel router: partial-route trunk bundling, explicit boundary gateways, incremental route
+not a full hierarchical channel router: partial-route trunk bundling across different connections, incremental route
 caching and manual waypoints are future work.
 Overlapping cards can make ports unroutable; those branches are omitted rather
 than drawn through obstacles. Prototype limits are 500 entities/2,000 connections;

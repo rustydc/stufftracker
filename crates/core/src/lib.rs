@@ -414,20 +414,6 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
         }
         result
     };
-    // Expanded space interiors are traversable. Headers, devices and collapsed
-    // spaces are obstacles; crossing a space boundary is allowed, never its title.
-    let obstacles: Vec<_> = nodes
-        .iter()
-        .map(|n| Rect {
-            position: n.position,
-            width: n.width,
-            height: if n.container && !n.collapsed {
-                52.
-            } else {
-                n.height
-            },
-        })
-        .collect();
     type Key = (String, Vec<(String, Role)>);
     let mut groups: BTreeMap<Key, Vec<String>> = BTreeMap::new();
     for c in &doc.connections {
@@ -449,103 +435,56 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
             .or_default()
             .push(c.id.clone());
     }
-    let node_for = |id: &str| nodes.iter().find(|n| n.id == id).unwrap();
-    let ancestors = |id: &str| {
-        let mut path = Vec::new();
-        let mut at = doc
-            .entities
-            .iter()
-            .find(|e| e.id == id)
-            .and_then(|e| e.parent.as_deref());
-        while let Some(id) = at {
-            path.push(id.to_string());
-            at = doc
-                .entities
-                .iter()
-                .find(|e| e.id == id)
-                .and_then(|e| e.parent.as_deref());
-        }
-        path
+    let router = HierarchyRouter {
+        document: doc,
+        nodes: &nodes,
     };
     let mut bundles = Vec::new();
     for (channel, ((layer, eps), connections)) in groups.into_iter().enumerate() {
-        let first_path = ancestors(&eps[0].0);
+        let first_path = router.ancestors(&eps[0].0);
         let common = first_path
             .iter()
-            .find(|ancestor| eps.iter().all(|(id, _)| ancestors(id).contains(ancestor)))
-            .map(|id| node_for(id));
-        let mut ys: Vec<_> = eps
+            .find(|ancestor| {
+                eps.iter()
+                    .all(|(id, _)| router.ancestors(id).contains(ancestor))
+            })
+            .map(String::as_str);
+        let centers: Vec<_> = eps.iter().map(|(id, _)| router.center(id)).collect();
+        let junction = router.junction(common, &centers, channel);
+        let mut gates: BTreeMap<String, Gate> = BTreeMap::new();
+        let spaces: BTreeSet<_> = eps
             .iter()
-            .map(|(id, _)| {
-                let n = node_for(id);
-                n.position.y
-                    + if n.container && !n.collapsed {
-                        26.
-                    } else {
-                        36.
-                    }
+            .flat_map(|(id, _)| {
+                router
+                    .ancestors(id)
+                    .into_iter()
+                    .take_while(|id| Some(id.as_str()) != common)
             })
             .collect();
-        ys.sort_by(f64::total_cmp);
-        let mut junction = if let Some(parent) = common {
-            Point {
-                x: parent.position.x + parent.width - 12. - (channel % 3) as f64 * 3.,
-                y: ys[ys.len() / 2],
+        let mut spaces: Vec<_> = spaces.into_iter().collect();
+        spaces.sort_by_key(|id| router.node(id).depth);
+        // Choose outer gateways first. An inner gateway is scored against the
+        // actual route to its parent's gateway, not a straight-line shortcut
+        // through the parent's obstacles or header.
+        for ancestor in spaces {
+            let target = router
+                .parent(&ancestor)
+                .and_then(|id| gates.get(id))
+                .map(|gate| gate.inside)
+                .unwrap_or(junction);
+            let members: Vec<_> = eps
+                .iter()
+                .filter(|(id, _)| router.ancestors(id).contains(&ancestor))
+                .map(|(id, _)| router.center(id))
+                .collect();
+            if let Some(gate) = router.gate(&ancestor, target, &members) {
+                gates.insert(ancestor, gate);
             }
-        } else {
-            Point {
-                x: eps
-                    .iter()
-                    .map(|(id, _)| {
-                        let n = node_for(id);
-                        n.position.x + n.width
-                    })
-                    .fold(f64::NEG_INFINITY, f64::max)
-                    + 40.
-                    + channel as f64 * 20.,
-                y: ys[ys.len() / 2],
-            }
-        };
-        while obstacles.iter().any(|r| r.contains(junction, 8.)) {
-            junction.y += 16.;
         }
         let branches = eps
             .into_iter()
             .map(|(id, role)| {
-                let n = node_for(&id);
-                let center = n.position.x + n.width / 2.;
-                let start = Point {
-                    x: if junction.x >= center {
-                        n.position.x + n.width
-                    } else {
-                        n.position.x
-                    },
-                    y: n.position.y
-                        + if n.container && !n.collapsed {
-                            26.
-                        } else {
-                            36.
-                        },
-                };
-                let lead = Point {
-                    x: start.x + if junction.x >= center { 12. } else { -12. },
-                    y: start.y,
-                };
-                let elbow = Point {
-                    x: junction.x,
-                    y: lead.y,
-                };
-                let mut points =
-                    if !blocked(lead, elbow, &obstacles) && !blocked(elbow, junction, &obstacles) {
-                        let mut p = vec![lead, elbow, junction];
-                        p.dedup();
-                        p
-                    } else {
-                        route(lead, junction, &obstacles)
-                    };
-                if !points.is_empty() {
-                    points.insert(0, start);
-                }
+                let points = router.branch(&id, common, junction, &gates);
                 Branch {
                     entity: id,
                     role,
@@ -566,6 +505,324 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
         bundles,
         positions,
     })
+}
+
+/// Route one level at a time. Within a space, its immediate children are
+/// solid obstacles. A branch crosses each ancestor through one shared gateway
+/// and can never use an unrelated room (or re-enter an exited room) as a shortcut.
+struct HierarchyRouter<'a> {
+    document: &'a Document,
+    nodes: &'a [Node],
+}
+#[derive(Clone, Copy)]
+struct Gate {
+    inside: Point,
+    boundary: Point,
+    outside: Point,
+}
+fn distance(a: Point, b: Point) -> f64 {
+    (a.x - b.x).abs() + (a.y - b.y).abs()
+}
+fn simplify(path: Vec<Point>) -> Vec<Point> {
+    let mut result: Vec<Point> = Vec::new();
+    for p in path {
+        if result.last() == Some(&p) {
+            continue;
+        }
+        if result.len() >= 2 {
+            let a = result[result.len() - 2];
+            let b = result[result.len() - 1];
+            if (a.x == b.x && b.x == p.x) || (a.y == b.y && b.y == p.y) {
+                result.pop();
+            }
+        }
+        result.push(p);
+    }
+    result
+}
+impl HierarchyRouter<'_> {
+    fn node(&self, id: &str) -> &Node {
+        self.nodes.iter().find(|n| n.id == id).unwrap()
+    }
+    fn parent(&self, id: &str) -> Option<&str> {
+        self.document
+            .entities
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.parent.as_deref())
+    }
+    fn ancestors(&self, id: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut at = self.parent(id);
+        while let Some(id) = at {
+            result.push(id.into());
+            at = self.parent(id);
+        }
+        result
+    }
+    fn center(&self, id: &str) -> Point {
+        let n = self.node(id);
+        Point {
+            x: n.position.x + n.width / 2.,
+            y: n.position.y
+                + if n.container && !n.collapsed {
+                    26.
+                } else {
+                    n.height / 2.
+                },
+        }
+    }
+    fn bounds(&self, domain: Option<&str>) -> Option<Rect> {
+        domain.map(|id| {
+            let n = self.node(id);
+            Rect {
+                position: Point {
+                    x: n.position.x,
+                    y: n.position.y + 60.,
+                },
+                width: n.width,
+                height: n.height - 60.,
+            }
+        })
+    }
+    fn obstacles(&self, domain: Option<&str>) -> Vec<Rect> {
+        // The immediate child boxes include every nested space in full. Routes
+        // within a room see its device boxes; floor routes see solid room boxes.
+        self.nodes
+            .iter()
+            .filter(|n| self.parent(&n.id) == domain)
+            .map(|n| Rect {
+                position: n.position,
+                width: n.width,
+                height: n.height,
+            })
+            .collect()
+    }
+    fn junction(&self, domain: Option<&str>, centers: &[Point], channel: usize) -> Point {
+        let rects = self.obstacles(domain);
+        let bounds = self.bounds(domain);
+        let mut xs: Vec<_> = centers.iter().map(|p| p.x).collect();
+        let mut ys: Vec<_> = centers.iter().map(|p| p.y).collect();
+        let lane = (channel % 3) as f64 * 2.;
+        for r in &rects {
+            xs.extend([
+                r.position.x - 12. - lane,
+                r.position.x + r.width + 12. + lane,
+            ]);
+            ys.extend([
+                r.position.y - 12. - lane,
+                r.position.y + r.height + 12. + lane,
+            ]);
+        }
+        if let Some(b) = bounds {
+            xs.extend([b.position.x + 12., b.position.x + b.width - 12.]);
+            ys.extend([b.position.y + 4., b.position.y + b.height - 12.]);
+        }
+        let mut best = None;
+        for x in &xs {
+            for y in &ys {
+                let p = Point { x: *x, y: *y };
+                if bounds.is_some_and(|b| !in_bounds(p, b))
+                    || rects.iter().any(|r| r.contains(p, 8.))
+                {
+                    continue;
+                }
+                let score = centers.iter().map(|q| distance(p, *q)).sum::<f64>();
+                if best.is_none_or(|(cost, _)| score < cost) {
+                    best = Some((score, p));
+                }
+            }
+        }
+        best.map(|(_, p)| p).unwrap_or_else(|| {
+            let n = self.nodes.first().unwrap();
+            Point {
+                x: n.position.x + n.width + 24.,
+                y: n.position.y + n.height + 24.,
+            }
+        })
+    }
+    fn gate(&self, id: &str, junction: Point, members: &[Point]) -> Option<Gate> {
+        let n = self.node(id);
+        let parent = self.parent(id);
+        let inside_rects = self.obstacles(Some(id));
+        let outside_rects = self.obstacles(parent);
+        let mut mx: Vec<_> = members.iter().map(|p| p.x).collect();
+        let mut my: Vec<_> = members.iter().map(|p| p.y).collect();
+        mx.sort_by(f64::total_cmp);
+        my.sort_by(f64::total_cmp);
+        let median = Point {
+            x: mx[mx.len() / 2],
+            y: my[my.len() / 2],
+        };
+        let top = n.position.y + 64.;
+        let bottom = (n.position.y + n.height - 12.).max(top);
+        let left = n.position.x;
+        let right = n.position.x + n.width;
+        let mut candidates = Vec::new();
+        for y in [
+            junction.y.clamp(top, bottom),
+            median.y.clamp(top, bottom),
+            top,
+            bottom,
+        ] {
+            for (x, normal) in [(left, -1.), (right, 1.)] {
+                candidates.push(Gate {
+                    inside: Point {
+                        x: x - normal * 12.,
+                        y,
+                    },
+                    boundary: Point { x, y },
+                    outside: Point {
+                        x: x + normal * 12.,
+                        y,
+                    },
+                });
+            }
+        }
+        for x in [junction.x, median.x, (left + right) / 2.] {
+            let x = x.clamp(left + 12., right - 12.);
+            let y = n.position.y + n.height;
+            candidates.push(Gate {
+                inside: Point { x, y: y - 12. },
+                boundary: Point { x, y },
+                outside: Point { x, y: y + 12. },
+            });
+        }
+        candidates
+            .into_iter()
+            .filter(|g| {
+                self.bounds(Some(id)).is_none_or(|b| in_bounds(g.inside, b))
+                    && self.bounds(parent).is_none_or(|b| in_bounds(g.outside, b))
+                    && !inside_rects.iter().any(|r| r.contains(g.inside, 8.))
+                    && !outside_rects.iter().any(|r| r.contains(g.outside, 8.))
+            })
+            .filter_map(|gate| {
+                let path = self.segment(gate.outside, junction, parent);
+                if path.is_empty() {
+                    return None;
+                }
+                let cost = members
+                    .iter()
+                    .map(|p| distance(*p, gate.inside))
+                    .sum::<f64>()
+                    + path.windows(2).map(|p| distance(p[0], p[1])).sum::<f64>()
+                    + path.len() as f64 * 28.;
+                Some((cost, gate))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, gate)| gate)
+    }
+    fn segment(&self, start: Point, end: Point, domain: Option<&str>) -> Vec<Point> {
+        route(start, end, &self.obstacles(domain), self.bounds(domain))
+    }
+    fn branch(
+        &self,
+        id: &str,
+        common: Option<&str>,
+        junction: Point,
+        gates: &BTreeMap<String, Gate>,
+    ) -> Vec<Point> {
+        let levels: Vec<_> = self
+            .ancestors(id)
+            .into_iter()
+            .take_while(|a| Some(a.as_str()) != common)
+            .collect();
+        if levels.iter().any(|id| !gates.contains_key(id)) {
+            return Vec::new();
+        }
+        let first = levels
+            .first()
+            .map(|id| gates[id].inside)
+            .unwrap_or(junction);
+        let n = self.node(id);
+        let y = self.center(id).y;
+        let mut ports = vec![
+            (
+                Point { x: n.position.x, y },
+                Point {
+                    x: n.position.x - 12.,
+                    y,
+                },
+            ),
+            (
+                Point {
+                    x: n.position.x + n.width,
+                    y,
+                },
+                Point {
+                    x: n.position.x + n.width + 12.,
+                    y,
+                },
+            ),
+        ];
+        if !n.container || n.collapsed {
+            let x = n.position.x + n.width / 2.;
+            ports.extend([
+                (
+                    Point { x, y: n.position.y },
+                    Point {
+                        x,
+                        y: n.position.y - 12.,
+                    },
+                ),
+                (
+                    Point {
+                        x,
+                        y: n.position.y + n.height,
+                    },
+                    Point {
+                        x,
+                        y: n.position.y + n.height + 12.,
+                    },
+                ),
+            ]);
+        }
+        let mut best: Option<(f64, Vec<Point>)> = None;
+        for (port, lead) in ports {
+            let part = self.segment(lead, first, self.parent(id));
+            if part.is_empty() {
+                continue;
+            }
+            let mut path = vec![port];
+            path.extend(part);
+            let path = simplify(path);
+            let score = path.windows(2).map(|p| distance(p[0], p[1])).sum::<f64>()
+                + path.len() as f64 * 28.;
+            if best.as_ref().is_none_or(|(cost, _)| score < *cost) {
+                best = Some((score, path));
+            }
+        }
+        let Some((_, mut path)) = best else {
+            return Vec::new();
+        };
+        let mut at = first;
+        for (i, level) in levels.iter().enumerate() {
+            let gate = gates[level];
+            if i > 0 {
+                let part = self.segment(at, gate.inside, Some(level));
+                if part.is_empty() {
+                    return Vec::new();
+                }
+                path.extend(part);
+            }
+            path.extend([gate.boundary, gate.outside]);
+            at = gate.outside;
+        }
+        if !levels.is_empty() {
+            let part = self.segment(at, junction, common);
+            if part.is_empty() {
+                return Vec::new();
+            }
+            path.extend(part);
+        }
+        simplify(path)
+    }
+}
+fn in_bounds(p: Point, b: Rect) -> bool {
+    p.x >= b.position.x
+        && p.x <= b.position.x + b.width
+        && p.y >= b.position.y
+        && p.y <= b.position.y + b.height
 }
 
 #[derive(Serialize, Deserialize)]
@@ -645,12 +902,21 @@ fn blocked(a: Point, b: Point, rects: &[Rect]) -> bool {
     })
 }
 /// Rectilinear visibility grid + Dijkstra with a bend penalty. Obstacles are cards.
-fn route(start: Point, end: Point, rects: &[Rect]) -> Vec<Point> {
+fn route(start: Point, end: Point, rects: &[Rect], bounds: Option<Rect>) -> Vec<Point> {
+    if bounds.is_some_and(|b| !in_bounds(start, b) || !in_bounds(end, b)) {
+        return Vec::new();
+    }
     let mut xs = vec![start.x, end.x];
     let mut ys = vec![start.y, end.y];
     for r in rects {
         xs.extend([r.position.x - 12., r.position.x + r.width + 12.]);
         ys.extend([r.position.y - 12., r.position.y + r.height + 12.]);
+    }
+    if let Some(b) = bounds {
+        xs.extend([b.position.x, b.position.x + b.width]);
+        ys.extend([b.position.y, b.position.y + b.height]);
+        xs.retain(|x| *x >= b.position.x && *x <= b.position.x + b.width);
+        ys.retain(|y| *y >= b.position.y && *y <= b.position.y + b.height);
     }
     xs.sort_by(f64::total_cmp);
     xs.dedup();
@@ -752,6 +1018,186 @@ pub fn sample() -> Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn visits(path: &[Point], rect: Rect) -> Vec<(f64, f64)> {
+        let mut intervals: Vec<(f64, f64)> = Vec::new();
+        let mut offset = 0.;
+        for pair in path.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            let length = distance(a, b);
+            let clip = if a.y == b.y && a.y > rect.position.y && a.y < rect.position.y + rect.height
+            {
+                let lo = a.x.min(b.x).max(rect.position.x);
+                let hi = a.x.max(b.x).min(rect.position.x + rect.width);
+                (hi > lo).then_some((
+                    (lo - a.x).abs().min((hi - a.x).abs()),
+                    (lo - a.x).abs().max((hi - a.x).abs()),
+                ))
+            } else if a.x == b.x && a.x > rect.position.x && a.x < rect.position.x + rect.width {
+                let lo = a.y.min(b.y).max(rect.position.y);
+                let hi = a.y.max(b.y).min(rect.position.y + rect.height);
+                (hi > lo).then_some((
+                    (lo - a.y).abs().min((hi - a.y).abs()),
+                    (lo - a.y).abs().max((hi - a.y).abs()),
+                ))
+            } else {
+                None
+            };
+            if let Some((lo, hi)) = clip {
+                let range = (offset + lo, offset + hi);
+                if let Some(last) = intervals
+                    .last_mut()
+                    .filter(|last| (last.1 - range.0).abs() < 1e-5)
+                {
+                    last.1 = range.1;
+                } else {
+                    intervals.push(range);
+                }
+            }
+            offset += length;
+        }
+        intervals
+    }
+    fn exit_point(path: &[Point], n: &Node) -> Point {
+        let rect = Rect {
+            position: n.position,
+            width: n.width,
+            height: n.height,
+        };
+        for pair in path.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            if in_bounds(a, rect) && !in_bounds(b, rect) {
+                return if a.x == b.x {
+                    Point {
+                        x: a.x,
+                        y: if b.y < a.y {
+                            n.position.y
+                        } else {
+                            n.position.y + n.height
+                        },
+                    }
+                } else {
+                    Point {
+                        x: if b.x < a.x {
+                            n.position.x
+                        } else {
+                            n.position.x + n.width
+                        },
+                        y: a.y,
+                    }
+                };
+            }
+        }
+        panic!("branch never leaves {}", n.id)
+    }
+    #[test]
+    fn routes_only_visit_endpoint_ancestors_and_cross_each_once() {
+        let doc = sample();
+        let initial = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: View::default(),
+        })
+        .unwrap();
+        for (dx, dy, collapsed) in [
+            (0., 0., false),
+            (0., 24., false),
+            (20., 20., false),
+            (0., 0., true),
+        ] {
+            let mut view = View {
+                layout_version: 2,
+                positions: initial.positions.clone(),
+                ..View::default()
+            };
+            let p = view.positions.get_mut("kitchen").unwrap();
+            p.x += dx;
+            p.y += dy;
+            if collapsed {
+                view.collapsed.insert("kitchen".into());
+            }
+            let result = layout(&LayoutRequest {
+                document: doc.clone(),
+                view,
+            })
+            .unwrap();
+            let router = HierarchyRouter {
+                document: &doc,
+                nodes: &result.nodes,
+            };
+            for bundle in &result.bundles {
+                for branch in &bundle.branches {
+                    assert!(
+                        !branch.points.is_empty(),
+                        "missing route {:?}: {} at {dx},{dy}",
+                        bundle.connections,
+                        branch.entity
+                    );
+                    let ancestors = router.ancestors(&branch.entity);
+                    for n in &result.nodes {
+                        if n.id == branch.entity {
+                            continue;
+                        }
+                        let rect = Rect {
+                            position: n.position,
+                            width: n.width,
+                            height: n.height,
+                        };
+                        if ancestors.contains(&n.id) {
+                            let closed = Rect {
+                                position: Point {
+                                    x: rect.position.x - 1e-6,
+                                    y: rect.position.y - 1e-6,
+                                },
+                                width: rect.width + 2e-6,
+                                height: rect.height + 2e-6,
+                            };
+                            assert_eq!(
+                                visits(&branch.points, closed).len(),
+                                1,
+                                "{} leaves then re-enters {}",
+                                branch.entity,
+                                n.id
+                            );
+                        } else {
+                            assert!(
+                                visits(&branch.points, rect).is_empty(),
+                                "{} transits unrelated {} in {:?}",
+                                branch.entity,
+                                n.id,
+                                bundle.connections
+                            );
+                        }
+                    }
+                    for pair in branch.points.windows(2) {
+                        assert!(pair[0].x == pair[1].x || pair[0].y == pair[1].y);
+                    }
+                }
+            }
+            if !collapsed {
+                let circuit = result
+                    .bundles
+                    .iter()
+                    .find(|b| b.connections.contains(&"circuit".into()))
+                    .unwrap();
+                let kitchen = router.node("kitchen");
+                let lamp = circuit
+                    .branches
+                    .iter()
+                    .find(|b| b.entity == "lamp")
+                    .unwrap();
+                let sensor = circuit
+                    .branches
+                    .iter()
+                    .find(|b| b.entity == "sensor")
+                    .unwrap();
+                assert_eq!(
+                    exit_point(&lamp.points, kitchen),
+                    exit_point(&sensor.points, kitchen)
+                );
+            }
+        }
+    }
     #[test]
     fn hierarchy_is_contained_and_siblings_do_not_overlap() {
         let doc = sample();
@@ -960,7 +1406,12 @@ mod tests {
             width: 200.,
             height: 72.,
         }];
-        let path = route(Point { x: 0., y: 36. }, Point { x: 400., y: 36. }, &rects);
+        let path = route(
+            Point { x: 0., y: 36. },
+            Point { x: 400., y: 36. },
+            &rects,
+            None,
+        );
         assert!(path.len() >= 4);
         for p in path.windows(2) {
             assert!(p[0].x == p[1].x || p[0].y == p[1].y);
