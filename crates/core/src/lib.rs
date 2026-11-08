@@ -11,6 +11,48 @@ pub struct Entity {
     pub parent: Option<String>,
     #[serde(default)]
     pub links: Vec<ExternalLink>,
+    /// How the physical layout view draws this thing's `ports`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faceplate: Option<Faceplate>,
+    /// Physical attachment points (switch ports, panel breakers, controller
+    /// terminals). A connection endpoint may name one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<Port>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Faceplate {
+    /// Breaker panel: spaces numbered odd down the left column and even
+    /// down the right, as panels are labelled.
+    Panel,
+    /// Network switch: one row per port, in port order.
+    Switch,
+    /// Terminal strip (zone controllers, relay boards): one row per terminal.
+    Terminals,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Port {
+    /// Unique within its entity; what an endpoint's `port` names, e.g.
+    /// "14", "1/3", "5A", "eth3", "Z2".
+    pub id: String,
+    /// What is written beside it: "20 A kitchen", "PoE+ 2.5G", "Zone 2 gym".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// The space or port number it starts at. A panel breaker of N poles
+    /// covers spaces position, position+2, … on the same side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
+    /// Spaces covered (panel breakers: 1, 2 or 3). Defaults to 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poles: Option<u32>,
+    /// "A" or "B": one half of a tandem (twin) breaker sharing its space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub half: Option<String>,
+}
+impl Port {
+    fn poles(&self) -> u32 {
+        self.poles.unwrap_or(1).max(1)
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExternalLink {
@@ -29,6 +71,9 @@ pub enum Role {
 pub struct Endpoint {
     pub entity: String,
     pub role: Role,
+    /// One of the entity's `ports`, where known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Connection {
@@ -67,6 +112,33 @@ pub struct View {
     pub hidden_layers: BTreeSet<String>,
     #[serde(default)]
     pub attachment_hints: BTreeMap<String, Point>,
+    /// Entities drawn with their physical layout (ports) instead of a card.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub faceplates: BTreeSet<String>,
+    /// Show only part of the graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<Focus>,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Focus {
+    /// The things to show; a space brings everything inside it.
+    pub entities: Vec<String>,
+    /// How many connections away to follow; none = everything reachable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hops: Option<u32>,
+    #[serde(default)]
+    pub direction: Direction,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    /// Every connection, either way.
+    #[default]
+    Both,
+    /// Toward sources: what feeds this.
+    Upstream,
+    /// Toward targets: what this feeds.
+    Downstream,
 }
 #[derive(Serialize, Deserialize)]
 pub struct LayoutRequest {
@@ -85,6 +157,41 @@ pub struct Node {
     pub depth: usize,
     pub container: bool,
     pub collapsed: bool,
+    /// Present when the node is drawn as its physical layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faceplate: Option<FaceplateLayout>,
+}
+/// A faceplate's port geometry, relative to its node's origin.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FaceplateLayout {
+    pub kind: Faceplate,
+    pub ports: Vec<PortBox>,
+    /// Unoccupied spaces or positions, drawn as empty slots.
+    pub empty: Vec<PortBox>,
+    /// Row collecting this thing's connections with no port assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unassigned: Option<PortBox>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PortBox {
+    /// The port's ID; empty for an unused slot.
+    pub id: String,
+    pub label: String,
+    /// The space numbers it covers, as printed: "14", "1/3", "5A".
+    pub position: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// Which card edge its wires leave from.
+    pub side: Side,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    Left,
+    Right,
+    Either,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Branch {
@@ -141,6 +248,7 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         if e.name.trim().is_empty() {
             return Err("An entity needs a name".into());
         }
+        validate_ports(e)?;
         let mut seen = BTreeSet::new();
         let mut current = Some(e.id.as_str());
         while let Some(id) = current {
@@ -166,6 +274,61 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         for ep in &c.endpoints {
             if !ids.contains(ep.entity.as_str()) || !endpoints.insert(&ep.entity) {
                 return Err("Unknown or duplicate endpoint".into());
+            }
+            if let Some(port) = &ep.port {
+                let e = doc.entities.iter().find(|e| e.id == ep.entity).unwrap();
+                if !e.ports.iter().any(|p| &p.id == port) {
+                    return Err(format!("{} has no port {port:?}", e.name));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Port IDs are unique and every occupied space or position is taken once
+/// (tandem halves A and B may share a breaker space).
+fn validate_ports(e: &Entity) -> Result<(), String> {
+    if e.ports.len() > 256 {
+        return Err(format!("{}: at most 256 ports", e.name));
+    }
+    let mut ids = BTreeSet::new();
+    let mut taken: BTreeMap<u32, Option<&str>> = BTreeMap::new();
+    for p in &e.ports {
+        if p.id.trim().is_empty() || p.id.len() > 40 || !ids.insert(p.id.as_str()) {
+            return Err(format!("{}: port IDs must be nonempty and unique", e.name));
+        }
+        if p.label.len() > 200 || !(1..=3).contains(&p.poles()) {
+            return Err(format!("{}: port {} needs 1-3 poles", e.name, p.id));
+        }
+        if p.half.as_deref().is_some_and(|h| h != "A" && h != "B") {
+            return Err(format!("{}: port {} half must be A or B", e.name, p.id));
+        }
+        let Some(start) = p.position else { continue };
+        if start == 0 || start > 999 {
+            return Err(format!("{}: port {} position must be 1-999", e.name, p.id));
+        }
+        let step = if e.faceplate == Some(Faceplate::Panel) {
+            2
+        } else {
+            1
+        };
+        for space in (0..p.poles()).map(|k| start + k * step) {
+            let half = p.half.as_deref();
+            match taken.get(&space) {
+                // Two halves of one tandem space.
+                Some(Some(other)) if half.is_some_and(|h| h != *other) => {
+                    taken.insert(space, None);
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "{}: position {space} is used twice (port {})",
+                        e.name, p.id
+                    ));
+                }
+                None => {
+                    taken.insert(space, half);
+                }
             }
         }
     }
@@ -206,15 +369,193 @@ pub fn validate_view(view: &View) -> Result<(), String> {
     {
         return Err("Invalid coordinates".into());
     }
+    if view.faceplates.len() > 500
+        || view
+            .focus
+            .as_ref()
+            .is_some_and(|f| f.entities.len() > 500 || f.hops.is_some_and(|h| h > 50))
+    {
+        return Err("View focus or faceplates out of range".into());
+    }
     Ok(())
 }
 
 /// Measure the full hierarchy before applying collapse. Sibling slots remain
 /// reserved, so folding a room never moves another room or loses hidden offsets.
+/// Where a wire attaches to a faceplate node: the named port's row, or the
+/// "not assigned" row for a connection without one. x encodes the edge
+/// (-1 left, 1 right, 0 either); y is relative to the node.
+fn faceplate_pin(n: &Node, port: Option<&str>) -> Option<Point> {
+    let f = n.faceplate.as_ref()?;
+    let b = match port {
+        Some(id) => f.ports.iter().find(|b| b.id == id)?,
+        None => f.unassigned.as_ref()?,
+    };
+    Some(Point {
+        x: match b.side {
+            Side::Left => -1.,
+            Side::Right => 1.,
+            Side::Either => 0.,
+        },
+        y: b.y + b.height / 2.,
+    })
+}
+const FACE_HEADER: f64 = 56.;
+const FACE_ROW: f64 = 24.;
+/// Physical layouts for the entities the view shows as faceplates: leaves
+/// (a space keeps its contents view) that have ports or a faceplate kind.
+fn faceplate_layouts(doc: &Document, view: &View) -> BTreeMap<String, (Size, FaceplateLayout)> {
+    let mut out = BTreeMap::new();
+    for e in &doc.entities {
+        if !view.faceplates.contains(&e.id)
+            || e.kind == "space"
+            || doc
+                .entities
+                .iter()
+                .any(|c| c.parent.as_deref() == Some(e.id.as_str()))
+            || (e.faceplate.is_none() && e.ports.is_empty())
+        {
+            continue;
+        }
+        let unassigned = doc.connections.iter().any(|c| {
+            !view.hidden_layers.contains(&c.layer)
+                && c.endpoints
+                    .iter()
+                    .any(|ep| ep.entity == e.id && ep.port.is_none())
+        });
+        out.insert(e.id.clone(), faceplate_layout(e, unassigned));
+    }
+    out
+}
+fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
+    let kind = e.faceplate.unwrap_or(Faceplate::Terminals);
+    let row_box = |x: f64, row: f64, rows: f64, width: f64, side: Side| PortBox {
+        id: String::new(),
+        label: String::new(),
+        position: String::new(),
+        x,
+        y: FACE_HEADER + row * FACE_ROW,
+        width,
+        height: rows * FACE_ROW - 4.,
+        side,
+    };
+    let mut ports = Vec::new();
+    let mut empty = Vec::new();
+    let mut rows = 0_f64;
+    let width;
+    let unpositioned: Vec<&Port> = e.ports.iter().filter(|p| p.position.is_none()).collect();
+    if kind == Faceplate::Panel {
+        // Two columns: odd spaces down the left, even down the right.
+        width = 320.;
+        let col = (width - 30.) / 2.;
+        let column = |space: u32| {
+            if space % 2 == 1 {
+                (10., Side::Left)
+            } else {
+                (20. + col, Side::Right)
+            }
+        };
+        let mut used = BTreeSet::new();
+        for p in e.ports.iter().filter(|p| p.position.is_some()) {
+            let start = p.position.unwrap();
+            let spaces: Vec<u32> = (0..p.poles()).map(|k| start + 2 * k).collect();
+            used.extend(spaces.iter().copied());
+            let (x, side) = column(start);
+            let row = ((start - 1) / 2) as f64;
+            let mut b = row_box(x, row, p.poles() as f64, col, side);
+            // A tandem's halves split its space top (A) and bottom (B).
+            if let Some(h) = &p.half {
+                b.height = (FACE_ROW - 4.) / 2. - 1.;
+                if h == "B" {
+                    b.y += b.height + 2.;
+                }
+            }
+            b.id = p.id.clone();
+            b.label = p.label.clone();
+            b.position = spaces
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("/")
+                + p.half.as_deref().unwrap_or("");
+            rows = rows.max(row + p.poles() as f64);
+            ports.push(b);
+        }
+        let last = used.iter().max().copied().unwrap_or(0);
+        for space in 1..=last + (last % 2) {
+            if !used.contains(&space) {
+                let (x, side) = column(space);
+                let mut b = row_box(x, ((space - 1) / 2) as f64, 1., col, side);
+                b.position = space.to_string();
+                empty.push(b);
+                rows = rows.max(((space - 1) / 2) as f64 + 1.);
+            }
+        }
+    } else {
+        // One row per port, in port order; gaps in the numbering stay visible.
+        width = 240.;
+        let mut positioned: Vec<&Port> = e.ports.iter().filter(|p| p.position.is_some()).collect();
+        positioned.sort_by_key(|p| p.position);
+        let mut taken = BTreeSet::new();
+        for p in &positioned {
+            let at = p.position.unwrap();
+            for k in 0..p.poles() {
+                taken.insert(at + k);
+            }
+            let mut b = row_box(
+                10.,
+                (at - 1) as f64,
+                p.poles() as f64,
+                width - 20.,
+                Side::Either,
+            );
+            b.id = p.id.clone();
+            b.label = p.label.clone();
+            b.position = at.to_string();
+            rows = rows.max((at - 1 + p.poles()) as f64);
+            ports.push(b);
+        }
+        for at in 1..=rows as u32 {
+            if !taken.contains(&at) {
+                let mut b = row_box(10., (at - 1) as f64, 1., width - 20., Side::Either);
+                b.position = at.to_string();
+                empty.push(b);
+            }
+        }
+    }
+    // Ports with no recorded position follow the numbered ones.
+    for p in unpositioned {
+        let mut b = row_box(10., rows, p.poles() as f64, width - 20., Side::Either);
+        b.id = p.id.clone();
+        b.label = p.label.clone();
+        rows += p.poles() as f64;
+        ports.push(b);
+    }
+    let unassigned = unassigned.then(|| {
+        let mut b = row_box(10., rows, 1., width - 20., Side::Either);
+        b.label = "not assigned to a port".into();
+        rows += 1.;
+        b
+    });
+    let size = Size {
+        width,
+        height: FACE_HEADER + rows.max(1.) * FACE_ROW + 8.,
+    };
+    (
+        size,
+        FaceplateLayout {
+            kind,
+            ports,
+            empty,
+            unassigned,
+        },
+    )
+}
 fn measure(
     id: &str,
     depth: usize,
     doc: &Document,
+    faces: &BTreeMap<String, (Size, FaceplateLayout)>,
     positions: &mut BTreeMap<String, Point>,
     sizes: &mut BTreeMap<String, Size>,
 ) -> Size {
@@ -225,16 +566,16 @@ fn measure(
         .filter(|e| e.parent.as_deref() == Some(id))
         .collect();
     if children.is_empty() && entity.kind != "space" {
-        let size = Size {
+        let size = faces.get(id).map(|(size, _)| *size).unwrap_or(Size {
             width: CARD_WIDTH,
             height: CARD_HEIGHT,
-        };
+        });
         sizes.insert(id.into(), size);
         return size;
     }
     let child_sizes: Vec<_> = children
         .iter()
-        .map(|e| measure(&e.id, depth + 1, doc, positions, sizes))
+        .map(|e| measure(&e.id, depth + 1, doc, faces, positions, sizes))
         .collect();
     let has_containers = children.iter().any(|e| {
         e.kind == "space"
@@ -305,7 +646,9 @@ fn measure(
     extent
 }
 
-type BundleKey = (String, Vec<(String, Role)>);
+/// (layer, visible endpoints, pinned ports). Connections to different ports
+/// of a faceplate are different wires, so the pins are part of the key.
+type BundleKey = (String, Vec<(String, Role)>, Vec<(String, String)>);
 /// Visible connections grouped into bundles: one per layer and set of
 /// visible endpoints (an endpoint inside a collapsed space projects onto it).
 fn bundle_groups(doc: &Document, view: &View) -> BTreeMap<BundleKey, Vec<String>> {
@@ -343,8 +686,18 @@ fn bundle_groups(doc: &Document, view: &View) -> BTreeMap<BundleKey, Vec<String>
         if eps.iter().map(|(id, _)| id).collect::<BTreeSet<_>>().len() < 2 {
             continue;
         }
+        // A port pins its wire only where the faceplate itself is drawn.
+        let mut pins: Vec<(String, String)> = c
+            .endpoints
+            .iter()
+            .filter(|ep| {
+                view.faceplates.contains(&ep.entity) && visible_ancestor(&ep.entity) == ep.entity
+            })
+            .filter_map(|ep| ep.port.clone().map(|p| (ep.entity.clone(), p)))
+            .collect();
+        pins.sort();
         groups
-            .entry((c.layer.clone(), eps))
+            .entry((c.layer.clone(), eps, pins))
             .or_default()
             .push(c.id.clone());
     }
@@ -366,10 +719,11 @@ fn place(doc: &Document, view: &View) -> Placement {
     };
     positions.retain(|id, _| doc.entities.iter().any(|e| &e.id == id));
     let mut sizes = BTreeMap::new();
+    let faces = faceplate_layouts(doc, view);
     let roots: Vec<_> = doc.entities.iter().filter(|e| e.parent.is_none()).collect();
     let mut root_y = 40.;
     for root in &roots {
-        let size = measure(&root.id, 0, doc, &mut positions, &mut sizes);
+        let size = measure(&root.id, 0, doc, &faces, &mut positions, &mut sizes);
         let p = positions
             .entry(root.id.clone())
             .or_insert(Point { x: 40., y: root_y });
@@ -381,8 +735,11 @@ fn place(doc: &Document, view: &View) -> Placement {
         depth: usize,
         doc: &Document,
         view: &View,
-        positions: &BTreeMap<String, Point>,
-        sizes: &BTreeMap<String, Size>,
+        (positions, sizes, faces): (
+            &BTreeMap<String, Point>,
+            &BTreeMap<String, Size>,
+            &BTreeMap<String, (Size, FaceplateLayout)>,
+        ),
         nodes: &mut Vec<Node>,
     ) {
         let e = doc.entities.iter().find(|e| e.id == id).unwrap();
@@ -410,6 +767,7 @@ fn place(doc: &Document, view: &View) -> Placement {
             depth,
             container,
             collapsed,
+            faceplate: faces.get(id).map(|(_, f)| f.clone()),
         });
         if !collapsed {
             for child in children {
@@ -419,8 +777,7 @@ fn place(doc: &Document, view: &View) -> Placement {
                     depth + 1,
                     doc,
                     view,
-                    positions,
-                    sizes,
+                    (positions, sizes, faces),
                     nodes,
                 );
             }
@@ -434,16 +791,157 @@ fn place(doc: &Document, view: &View) -> Placement {
             0,
             doc,
             view,
-            &positions,
-            &sizes,
+            (&positions, &sizes, &faces),
             &mut nodes,
         );
     }
     Placement { positions, nodes }
 }
+/// The things a focus shows: its entities (a space brings its contents),
+/// then whatever connections reach from them, `hops` steps at most, in the
+/// focus direction. Hidden layers are not followed.
+pub fn focus_set(doc: &Document, view: &View, focus: &Focus) -> BTreeSet<String> {
+    let exists: BTreeSet<&str> = doc.entities.iter().map(|e| e.id.as_str()).collect();
+    let mut reached: BTreeSet<String> = focus
+        .entities
+        .iter()
+        .filter(|id| exists.contains(id.as_str()))
+        .cloned()
+        .collect();
+    loop {
+        let inside: Vec<String> = doc
+            .entities
+            .iter()
+            .filter(|e| {
+                e.parent.as_ref().is_some_and(|p| reached.contains(p)) && !reached.contains(&e.id)
+            })
+            .map(|e| e.id.clone())
+            .collect();
+        if inside.is_empty() {
+            break;
+        }
+        reached.extend(inside);
+    }
+    let mut frontier = reached.clone();
+    let mut depth = 0;
+    while !frontier.is_empty() && focus.hops.is_none_or(|h| depth < h) {
+        let mut next = BTreeSet::new();
+        for c in doc
+            .connections
+            .iter()
+            .filter(|c| !view.hidden_layers.contains(&c.layer))
+        {
+            for from in c
+                .endpoints
+                .iter()
+                .filter(|ep| frontier.contains(&ep.entity))
+            {
+                for to in c.endpoints.iter().filter(|ep| ep.entity != from.entity) {
+                    let follows = match focus.direction {
+                        Direction::Both => true,
+                        Direction::Upstream => {
+                            (from.role == Role::Target && to.role == Role::Source)
+                                || (from.role == Role::Peer && to.role == Role::Peer)
+                        }
+                        Direction::Downstream => {
+                            (from.role == Role::Source && to.role == Role::Target)
+                                || (from.role == Role::Peer && to.role == Role::Peer)
+                        }
+                    };
+                    if follows && reached.insert(to.entity.clone()) {
+                        next.insert(to.entity.clone());
+                    }
+                }
+            }
+        }
+        frontier = next;
+        depth += 1;
+    }
+    reached
+}
+/// The document and view a focused layout is computed from: only the
+/// focused things, their enclosing spaces (expanded) and the connections
+/// among them, laid out compactly from scratch. The caller's positions and
+/// attachment hints are untouched; they belong to the full view.
+fn focus_projection(doc: &Document, view: &View) -> Option<(Document, View)> {
+    let focus = view.focus.as_ref()?;
+    let shown = focus_set(doc, view, focus);
+    let parent = |id: &str| {
+        doc.entities
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.parent.clone())
+    };
+    let mut context = BTreeSet::new();
+    for id in &shown {
+        let mut at = parent(id);
+        while let Some(p) = at {
+            at = parent(&p);
+            context.insert(p);
+        }
+    }
+    let keep = |id: &String| shown.contains(id) || context.contains(id);
+    let projected = Document {
+        entities: doc
+            .entities
+            .iter()
+            .filter(|e| keep(&e.id))
+            .cloned()
+            .collect(),
+        connections: doc
+            .connections
+            .iter()
+            .filter_map(|c| {
+                let endpoints: Vec<_> = c
+                    .endpoints
+                    .iter()
+                    .filter(|ep| shown.contains(&ep.entity))
+                    .cloned()
+                    .collect();
+                (endpoints.len() >= 2).then(|| Connection {
+                    endpoints,
+                    ..c.clone()
+                })
+            })
+            .collect(),
+        layers: doc.layers.clone(),
+    };
+    let collapsed = view
+        .collapsed
+        .iter()
+        .filter(|id| !context.contains(*id) && !focus.entities.contains(id))
+        .cloned()
+        .collect();
+    Some((
+        projected,
+        View {
+            layout_version: 2,
+            positions: BTreeMap::new(),
+            collapsed,
+            hidden_layers: view.hidden_layers.clone(),
+            attachment_hints: BTreeMap::new(),
+            faceplates: view.faceplates.clone(),
+            focus: None,
+        },
+    ))
+}
+fn focused(
+    req: &LayoutRequest,
+    lay: fn(&LayoutRequest) -> Result<Layout, String>,
+) -> Option<Result<Layout, String>> {
+    let (document, view) = focus_projection(&req.document, &req.view)?;
+    Some(lay(&LayoutRequest { document, view }).map(|mut l| {
+        l.positions = req.view.positions.clone();
+        l.attachment_hints = req.view.attachment_hints.clone();
+        l
+    }))
+}
 pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
     validate(&req.document)?;
     validate_view(&req.view)?;
+    if let Some(result) = focused(req, layout) {
+        return result;
+    }
     let doc = &req.document;
     let view = &req.view;
     let Placement {
@@ -453,7 +951,7 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
     let mut attachment_hints = view.attachment_hints.clone();
     let mut reserved = Vec::new();
     let mut bundles = Vec::new();
-    for (channel, ((layer, eps), connections)) in groups.into_iter().enumerate() {
+    for (channel, ((layer, eps, pins), connections)) in groups.into_iter().enumerate() {
         let mut router = HierarchyRouter {
             document: doc,
             nodes: &nodes,
@@ -469,6 +967,18 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
             .iter()
             .filter_map(|(k, v)| k.strip_prefix(&hint_prefix).map(|k| (k.to_owned(), *v)))
             .collect();
+        // Faceplate endpoints attach at their port's row (see branch()).
+        for (id, _) in &eps {
+            let port = pins.iter().find(|(e, _)| e == id).map(|(_, p)| p.as_str());
+            if let Some(pin) = router
+                .nodes
+                .iter()
+                .find(|n| &n.id == id)
+                .and_then(|n| faceplate_pin(n, port))
+            {
+                router.attachments.insert(format!("pin:{id}"), pin);
+            }
+        }
         let first_path = router.ancestors(&eps[0].0);
         let common = first_path
             .iter()
@@ -1427,16 +1937,23 @@ impl HierarchyRouter<'_> {
         if let Some(hint) = self.attachments.get(&format!("port:{id}")) {
             ys.insert(0, (n.position.y + hint.y).clamp(min_y, max_y));
         }
+        // A faceplate pins the wire to its port's row and edge.
+        let pin = self.attachments.get(&format!("pin:{id}")).copied();
+        if let Some(pin) = pin {
+            ys = vec![n.position.y + pin.y];
+        }
         for y in ys {
-            ports.extend([
-                (
+            if pin.is_none_or(|p| p.x <= 0.) {
+                ports.push((
                     Point { x: n.position.x, y },
                     Point {
                         x: n.position.x - 12.,
                         y,
                     },
-                ),
-                (
+                ));
+            }
+            if pin.is_none_or(|p| p.x >= 0.) {
+                ports.push((
                     Point {
                         x: n.position.x + n.width,
                         y,
@@ -1445,8 +1962,8 @@ impl HierarchyRouter<'_> {
                         x: n.position.x + n.width + 12.,
                         y,
                     },
-                ),
-            ]);
+                ));
+            }
         }
         ports.sort_by(|a, b| distance(a.1, first).total_cmp(&distance(b.1, first)));
         let mut best: Option<(f64, Vec<Point>)> = None;
@@ -2153,7 +2670,9 @@ pub fn move_entity(req: &MoveRequest) -> Result<View, String> {
                 .collect();
             covered.sort_by(|a, b| b.0.total_cmp(&a.0));
             if let Some((share, other)) = covered.first() {
-                if *share >= SWAP_SHARE {
+                // A box that has not moved (re-dropped in place to settle a
+                // size change) pushes what it covers; it never swaps.
+                if *share >= SWAP_SHARE && target != home {
                     positions.insert((*other).clone(), home);
                     fixed.push((*other).clone());
                     covered.remove(0);
@@ -2264,6 +2783,9 @@ fn separate(
 pub fn preview_layout(req: &LayoutRequest) -> Result<Layout, String> {
     validate(&req.document)?;
     validate_view(&req.view)?;
+    if let Some(result) = focused(req, preview_layout) {
+        return result;
+    }
     let Placement {
         positions, nodes, ..
     } = place(&req.document, &req.view);
@@ -2273,7 +2795,7 @@ pub fn preview_layout(req: &LayoutRequest) -> Result<Layout, String> {
         y: n.position.y + n.height / 2.,
     };
     let mut bundles = Vec::new();
-    for ((layer, eps), connections) in bundle_groups(&req.document, &req.view) {
+    for ((layer, eps, pins), connections) in bundle_groups(&req.document, &req.view) {
         let ends: Vec<_> = eps
             .iter()
             .filter_map(|(id, role)| by_id.get(id.as_str()).map(|n| (*n, role)))
@@ -2288,8 +2810,21 @@ pub fn preview_layout(req: &LayoutRequest) -> Result<Layout, String> {
         let branches = ends
             .iter()
             .map(|(n, role)| {
-                let c = centre(n);
-                let side = if hub.x >= c.x {
+                let mut c = centre(n);
+                let port = pins
+                    .iter()
+                    .find(|(e, _)| *e == n.id)
+                    .map(|(_, p)| p.as_str());
+                let pin = faceplate_pin(n, port);
+                if let Some(pin) = pin {
+                    c.y = n.position.y + pin.y;
+                }
+                let right = match pin.map(|p| p.x) {
+                    Some(x) if x < 0. => false,
+                    Some(x) if x > 0. => true,
+                    _ => hub.x >= c.x,
+                };
+                let side = if right {
                     n.position.x + n.width
                 } else {
                     n.position.x
@@ -3184,10 +3719,12 @@ mod tests {
                     Endpoint {
                         entity: "panel".into(),
                         role: Role::Source,
+                        port: None,
                     },
                     Endpoint {
                         entity: "lamp".into(),
                         role: Role::Target,
+                        port: None,
                     },
                 ],
             });
@@ -3228,10 +3765,12 @@ mod tests {
                     Endpoint {
                         entity: "panel".into(),
                         role: Role::Source,
+                        port: None,
                     },
                     Endpoint {
                         entity: "lamp".into(),
                         role: Role::Target,
+                        port: None,
                     },
                 ],
             })
@@ -3661,6 +4200,340 @@ mod tests {
             view,
         })
         .unwrap()
+    }
+    fn port(id: &str, position: u32, poles: u32, half: Option<&str>) -> Port {
+        Port {
+            id: id.into(),
+            label: format!("{id} label"),
+            position: Some(position),
+            poles: Some(poles),
+            half: half.map(Into::into),
+        }
+    }
+    /// The sample with a breaker schedule on its panel: 1 kitchen, 2 living,
+    /// a 2-pole breaker over spaces 3 and 5, and a tandem in space 6.
+    fn panel_doc() -> Document {
+        let mut doc = sample();
+        let panel = doc.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        panel.faceplate = Some(Faceplate::Panel);
+        panel.ports = vec![
+            port("1", 1, 1, None),
+            port("2", 2, 1, None),
+            port("3/5", 3, 2, None),
+            port("6A", 6, 1, Some("A")),
+            port("6B", 6, 1, Some("B")),
+        ];
+        for c in &mut doc.connections {
+            let at = match c.id.as_str() {
+                "circuit" => "1",
+                "living-power" => "2",
+                _ => continue,
+            };
+            c.endpoints[0].port = Some(at.into());
+        }
+        doc
+    }
+    #[test]
+    fn ports_validate_spaces_poles_tandems_and_endpoint_names() {
+        let doc = panel_doc();
+        validate(&doc).unwrap();
+        let with = |f: &dyn Fn(&mut Document)| {
+            let mut d = panel_doc();
+            f(&mut d);
+            validate(&d)
+        };
+        // A 2-pole breaker at 3 covers space 5: nothing else may start there.
+        assert!(
+            with(&|d| d
+                .entities
+                .iter_mut()
+                .find(|e| e.id == "panel")
+                .unwrap()
+                .ports
+                .push(port("5", 5, 1, None)))
+            .is_err()
+        );
+        // A third half, or a full breaker, in the tandem's space.
+        assert!(
+            with(&|d| d
+                .entities
+                .iter_mut()
+                .find(|e| e.id == "panel")
+                .unwrap()
+                .ports
+                .push(port("6", 6, 1, None)))
+            .is_err()
+        );
+        assert!(
+            with(&|d| d
+                .entities
+                .iter_mut()
+                .find(|e| e.id == "panel")
+                .unwrap()
+                .ports
+                .push(port("6C", 6, 1, Some("A"))))
+            .is_err()
+        );
+        // Duplicate IDs, bad halves, too many poles.
+        assert!(
+            with(&|d| d
+                .entities
+                .iter_mut()
+                .find(|e| e.id == "panel")
+                .unwrap()
+                .ports
+                .push(port("1", 9, 1, None)))
+            .is_err()
+        );
+        assert!(
+            with(&|d| d
+                .entities
+                .iter_mut()
+                .find(|e| e.id == "panel")
+                .unwrap()
+                .ports
+                .push(port("9", 9, 1, Some("C"))))
+            .is_err()
+        );
+        assert!(
+            with(&|d| d
+                .entities
+                .iter_mut()
+                .find(|e| e.id == "panel")
+                .unwrap()
+                .ports
+                .push(port("9", 9, 4, None)))
+            .is_err()
+        );
+        // An endpoint may only name one of its entity's ports.
+        assert!(with(&|d| d.connections[0].endpoints[1].port = Some("1".into())).is_err());
+        assert!(with(&|d| d.connections[0].endpoints[0].port = Some("99".into())).is_err());
+        // On a switch, positions count one apiece: 1 (2 wide) then 3 is fine.
+        assert!(
+            with(&|d| {
+                let p = d.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+                p.faceplate = Some(Faceplate::Switch);
+                p.ports = vec![port("a", 1, 2, None), port("b", 3, 1, None)];
+                for c in &mut d.connections {
+                    for ep in &mut c.endpoints {
+                        ep.port = None;
+                    }
+                }
+            })
+            .is_ok()
+        );
+    }
+    #[test]
+    fn panel_faceplate_numbers_columns_spans_poles_and_splits_tandems() {
+        let doc = panel_doc();
+        let panel = doc.entities.iter().find(|e| e.id == "panel").unwrap();
+        let (size, face) = faceplate_layout(panel, true);
+        let b = |id: &str| face.ports.iter().find(|b| b.id == id).unwrap();
+        // Odd spaces down the left, even down the right, row by row.
+        assert_eq!(b("1").side, Side::Left);
+        assert_eq!(b("2").side, Side::Right);
+        assert_eq!(b("1").y, b("2").y);
+        assert!(b("1").x < b("2").x);
+        // The 2-pole breaker spans rows 2 and 3 (spaces 3 and 5).
+        assert_eq!(b("3/5").position, "3/5");
+        assert_eq!(b("3/5").y, b("1").y + FACE_ROW);
+        assert!(b("3/5").height > FACE_ROW);
+        // Tandem halves share space 6, A above B.
+        assert_eq!(b("6A").position, "6A");
+        assert!(b("6A").y < b("6B").y && b("6B").y < b("6A").y + FACE_ROW);
+        // Space 4 is empty and drawn as a slot; the grid ends at row 3.
+        assert_eq!(
+            face.empty
+                .iter()
+                .map(|e| e.position.as_str())
+                .collect::<Vec<_>>(),
+            ["4"]
+        );
+        let unassigned = face.unassigned.unwrap();
+        assert_eq!(unassigned.y, FACE_HEADER + 3. * FACE_ROW);
+        assert_eq!(size.height, FACE_HEADER + 4. * FACE_ROW + 8.);
+    }
+    #[test]
+    fn faceplate_wires_attach_at_their_ports() {
+        let doc = panel_doc();
+        let mut view = View::default();
+        view.faceplates.insert("panel".into());
+        let result = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: view.clone(),
+        })
+        .unwrap();
+        let n = result.nodes.iter().find(|n| n.id == "panel").unwrap();
+        let face = n.faceplate.as_ref().expect("drawn as a faceplate");
+        assert!(n.height > CARD_HEIGHT && n.width > CARD_WIDTH);
+        assert!(result.unrouted_connections.is_empty());
+        for (connection, port) in [("circuit", "1"), ("living-power", "2")] {
+            let bundle = result
+                .bundles
+                .iter()
+                .find(|b| b.connections.contains(&connection.to_string()))
+                .unwrap();
+            let start = bundle
+                .branches
+                .iter()
+                .find(|b| b.entity == "panel")
+                .unwrap()
+                .points[0];
+            let b = face.ports.iter().find(|b| b.id == port).unwrap();
+            assert_eq!(start.y, n.position.y + b.y + b.height / 2., "{connection}");
+            let edge = if b.side == Side::Left {
+                n.position.x
+            } else {
+                n.position.x + n.width
+            };
+            assert_eq!(start.x, edge, "{connection} leaves its column's edge");
+        }
+        // Without the faceplate shown, the panel is an ordinary card.
+        let plain = layout(&LayoutRequest {
+            document: doc,
+            view: View::default(),
+        })
+        .unwrap();
+        let n = plain.nodes.iter().find(|n| n.id == "panel").unwrap();
+        assert!(n.faceplate.is_none() && n.height == CARD_HEIGHT);
+    }
+    #[test]
+    fn settling_a_new_faceplate_pushes_its_neighbours_aside() {
+        let doc = panel_doc();
+        let (mut view, _) = settled(&doc);
+        view.faceplates.insert("panel".into());
+        // Taller than the card it replaced, the faceplate now overlaps the
+        // things below it; a move to where it already is settles that.
+        let grown = preview_layout(&LayoutRequest {
+            document: doc.clone(),
+            view: view.clone(),
+        })
+        .unwrap();
+        let at = node(&grown, "panel").position;
+        let view = move_entity(&MoveRequest {
+            dragging: false,
+            document: doc.clone(),
+            view,
+            entity: "panel".into(),
+            position: at,
+        })
+        .unwrap();
+        let after = preview_layout(&LayoutRequest {
+            document: doc.clone(),
+            view,
+        })
+        .unwrap();
+        assert_eq!(node(&after, "panel").position, at);
+        assert_separated(&doc, &after);
+    }
+    #[test]
+    fn different_ports_are_different_wires() {
+        let mut doc = panel_doc();
+        // A second kitchen connection on breaker 2 to the same endpoints.
+        let mut twin = doc.connections[0].clone();
+        twin.id = "circuit-2".into();
+        twin.endpoints[0].port = Some("2".into());
+        doc.connections.push(twin);
+        let mut view = View::default();
+        let merged = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: view.clone(),
+        })
+        .unwrap();
+        assert!(merged.bundles.iter().any(|b| b.connections.len() == 2));
+        view.faceplates.insert("panel".into());
+        let split = layout(&LayoutRequest {
+            document: doc,
+            view,
+        })
+        .unwrap();
+        assert!(
+            split
+                .bundles
+                .iter()
+                .all(|b| !(b.connections.contains(&"circuit".to_string())
+                    && b.connections.contains(&"circuit-2".to_string())))
+        );
+    }
+    #[test]
+    fn focus_follows_hops_and_direction_and_keeps_the_full_view() {
+        let doc = sample();
+        let (view, _) = settled(&doc);
+        let shown = |focus: Focus| {
+            let mut v = view.clone();
+            v.focus = Some(focus.clone());
+            let l = layout(&LayoutRequest {
+                document: doc.clone(),
+                view: v.clone(),
+            })
+            .unwrap();
+            assert_eq!(
+                l.positions, view.positions,
+                "focus never rewrites the full view"
+            );
+            (focus_set(&doc, &v, &focus), l)
+        };
+        // One hop from the lamp: its circuit's panel and sensor, and HA.
+        let (set, l) = shown(Focus {
+            entities: vec!["lamp".into()],
+            hops: Some(1),
+            direction: Direction::Both,
+        });
+        assert_eq!(
+            set,
+            ["lamp", "panel", "sensor", "ha"]
+                .map(String::from)
+                .into_iter()
+                .collect()
+        );
+        // Shown: those plus the spaces around them, nothing else.
+        let ids: BTreeSet<_> = l.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains("kitchen") && ids.contains("utility") && ids.contains("house"));
+        assert!(!ids.contains("tv") && !ids.contains("office") && !ids.contains("desk"));
+        assert!(
+            l.bundles
+                .iter()
+                .all(|b| b.branches.iter().all(|br| set.contains(&br.entity)))
+        );
+        // Upstream from the TV: what feeds it (panel, router), not its peers.
+        let (set, _) = shown(Focus {
+            entities: vec!["tv".into()],
+            hops: None,
+            direction: Direction::Upstream,
+        });
+        assert_eq!(
+            set,
+            ["tv", "panel", "router"]
+                .map(String::from)
+                .into_iter()
+                .collect()
+        );
+        // Downstream from the router, everything it reaches.
+        let (set, _) = shown(Focus {
+            entities: vec!["router".into()],
+            hops: None,
+            direction: Direction::Downstream,
+        });
+        assert_eq!(
+            set,
+            ["router", "tv", "desk", "ha", "sensor", "speaker", "lamp"]
+                .map(String::from)
+                .into_iter()
+                .collect()
+        );
+        // A space brings its contents.
+        let (set, _) = shown(Focus {
+            entities: vec!["kitchen".into()],
+            hops: Some(0),
+            direction: Direction::Both,
+        });
+        assert_eq!(
+            set,
+            ["kitchen", "lamp", "sensor", "tap"]
+                .map(String::from)
+                .into_iter()
+                .collect()
+        );
     }
     #[test]
     fn dragging_onto_a_sibling_swaps_their_places() {

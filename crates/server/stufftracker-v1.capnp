@@ -33,6 +33,8 @@ interface StuffTrackerV1 {
   putView @13 (view :SavedView) -> ();
   # Delete a saved perspective by ID. Idempotent; requires write.
   deleteView @14 (id :Text) -> ();
+  # Set an entity's physical layout: its faceplate kind and full port list (switch ports, panel breakers, controller terminals). Replaces all its ports; refuses removing a port a connection endpoint still names. Requires write and the current revision.
+  putPorts @15 (expectedRevision :UInt64, entity :Text, faceplate :Faceplate, ports :List(Port)) -> (revision :UInt64);
 }
 struct Entity {
   id @0 :Text;
@@ -41,6 +43,32 @@ struct Entity {
   # Immediate StuffTracker parent ID, or empty for a root. This tree is independent of external systems.
   parent @3 :Text;
   links @4 :List(ExternalLink);
+  # How the physical layout view draws its ports. Read-only here: putEntity keeps the stored faceplate and ports; change them with putPorts.
+  faceplate @5 :Faceplate;
+  # Physical attachment points; read-only here like faceplate.
+  ports @6 :List(Port);
+}
+enum Faceplate {
+  # No physical layout.
+  none @0;
+  # Breaker panel: spaces numbered odd down the left column, even down the right.
+  panel @1;
+  # Network switch: one row per port in port order.
+  switch @2;
+  # Terminal strip (zone controller, relay board): one row per terminal.
+  terminals @3;
+}
+struct Port {
+  # Unique within the entity, as printed on the device: "14", "1/3", "5A", "eth3", "Z2". Endpoint.port names it.
+  id @0 :Text;
+  # What is written beside it, e.g. "20 A kitchen", "PoE+ 2.5G", "Zone 2 gym".
+  label @1 :Text;
+  # Starting space or port number; 0 if unknown. A panel breaker of N poles covers position, position+2, and so on, on its side.
+  position @2 :UInt32;
+  # Spaces covered: 1, 2 or 3 (0 means 1). A 240 V breaker is 2.
+  poles @3 :UInt8;
+  # "A" or "B" for one half of a tandem breaker sharing its space; empty otherwise.
+  half @4 :Text;
 }
 struct ExternalLink {
   provider @0 :Text;
@@ -48,7 +76,12 @@ struct ExternalLink {
   externalId @2 :Text;
 }
 enum Role { source @0; target @1; peer @2; }
-struct Endpoint { entity @0 :Text; role @1 :Role; }
+struct Endpoint {
+  entity @0 :Text;
+  role @1 :Role;
+  # Which of the entity's ports it attaches to, where known; empty otherwise.
+  port @2 :Text;
+}
 struct Connection {
   id @0 :Text;
   name @1 :Text;

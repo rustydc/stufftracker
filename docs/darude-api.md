@@ -22,6 +22,7 @@ another session with broader access was opened.
 | `listConnections`, `putConnection`, `deleteConnection`   | Query and edit hyperedges, layers, and source/target/peer endpoints |
 | `listLayers`, `putLayer`, `deleteLayer`                  | Manage connection layers                                            |
 | `listViews`, `putView`, `deleteView`                     | Manage saved perspectives                                           |
+| `putPorts`                                               | Set a thing's physical layout: faceplate kind and ports             |
 
 Entity and connection listings accept `offset` and `limit` (default 100, maximum
 200), and return `nextOffset`, `hasMore`, and the inventory `revision`. Entity
@@ -66,11 +67,73 @@ the wire; internally and in the HTTP JSON model this is `null`. External links
 are references only; they do not fetch live state or grant Home Assistant access.
 `putEntity` replaces the entire `links` list.
 
-Connections contain `id`, `name`, `layer`, and `endpoints`, each with an entity ID
-and a role (`source`, `target`, or `peer`). Containment cycles, dangling parents,
+Connections contain `id`, `name`, `layer`, and `endpoints`, each with an entity ID,
+a role (`source`, `target`, or `peer`), and optionally the entity's `port`. Containment cycles, dangling parents,
 unknown layers/endpoints, duplicate endpoints, and invalid layer colors are
 rejected by the same validation as the HTTP API. A layer color must be six-digit
 hex, such as `#ff8800`.
+
+## Ports and physical layouts
+
+An entity may carry `ports` (switch ports, panel breakers, controller terminals)
+and a `faceplate` saying how they are drawn: `panel`, `switch`, `terminals`, or
+`none`. Both are returned by `getEntity`, `listEntities` and `getDocument`, and
+written by `putDocument`; `putEntity` **keeps** an entity's stored ports and
+faceplate, so renaming a panel never drops its breakers. Change them with
+`putPorts`, which replaces the entity's whole port list:
+
+```json
+{
+  "expectedRevision": 7,
+  "entity": "panel-c",
+  "faceplate": "panel",
+  "ports": [
+    {
+      "id": "1",
+      "label": "20 A outlet below C",
+      "position": 1,
+      "poles": 1,
+      "half": ""
+    },
+    {
+      "id": "3/5",
+      "label": "30 A well pump",
+      "position": 3,
+      "poles": 2,
+      "half": ""
+    },
+    {
+      "id": "6A",
+      "label": "15 A shed lights",
+      "position": 6,
+      "poles": 1,
+      "half": "A"
+    },
+    {
+      "id": "6B",
+      "label": "15 A shed outlets",
+      "position": 6,
+      "poles": 1,
+      "half": "B"
+    }
+  ]
+}
+```
+
+- `id` is unique within the entity and is what an endpoint names; use what is
+  printed on the device.
+- `position` is the starting space or port number (`0` if unknown). Panels
+  number spaces odd down the left column and even down the right. A breaker of
+  `poles` N covers position, position+2, … on its side: a 240 V double-pole
+  breaker at 3 covers 3 and 5.
+- `half` is `A` or `B` for one half of a tandem (twin) breaker; two halves may
+  share a space, nothing else may.
+- `label` is free text: amps, speed or PoE, what the terminal drives.
+
+Overlapping spaces, duplicate IDs, more than three poles, or a half other than
+A/B are rejected. A connection endpoint names a port with `port` (empty when
+unknown); `putPorts` refuses to remove a port an endpoint still names, so
+reassign or clear those endpoints first (or use `putDocument`).
 
 Deleting an entity refuses if it has children or participates in connections.
 Deleting a layer refuses while connections use it. Delete or reparent references
@@ -93,6 +156,26 @@ wire schema. For example:
   }
 }
 ```
+
+A view may also list `faceplates` (entity IDs drawn as their physical layout)
+and a `focus` that shows only part of the graph: `entities` to start from (a
+space brings its contents), `hops` (connections to follow; omit for all), and
+`direction`: `both`, `upstream` (what feeds them) or `downstream` (what they
+feed). For example, everything fed by the barn panel, drawn as a faceplate:
+
+```json
+{
+  "layout_version": 2,
+  "positions": {},
+  "collapsed": [],
+  "hidden_layers": [],
+  "faceplates": ["barn-panel"],
+  "focus": { "entities": ["barn-panel"], "direction": "downstream" }
+}
+```
+
+A focused view is laid out compactly by itself; its `positions` are those of
+the full view and are left untouched.
 
 Saved views do not change inventory revisions and use last-writer-wins by ID,
 matching the existing HTTP behavior. View JSON and coordinates are validated;

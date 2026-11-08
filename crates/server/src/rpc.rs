@@ -5,7 +5,9 @@ use crate::{
 };
 use capnp::capability::{FromClientHook, Promise};
 use std::rc::Rc;
-use stufftracker_core::{Connection, Document, Endpoint, Entity, ExternalLink, Layer, Role};
+use stufftracker_core::{
+    Connection, Document, Endpoint, Entity, ExternalLink, Faceplate, Layer, Port, Role,
+};
 use wire::stuff_tracker_v1 as api;
 
 fn error(e: crate::Error) -> capnp::Error {
@@ -48,20 +50,66 @@ fn entity_read(r: wire::entity::Reader<'_>) -> capnp::Result<Entity> {
                 })
             })
             .collect::<capnp::Result<_>>()?,
+        faceplate: faceplate_read(r.get_faceplate())?,
+        ports: ports_read(r.get_ports()?)?,
     })
+}
+fn faceplate_read(
+    f: Result<wire::Faceplate, capnp::NotInSchema>,
+) -> capnp::Result<Option<Faceplate>> {
+    Ok(match f.map_err(|_| invalid("Unknown faceplate"))? {
+        wire::Faceplate::None => None,
+        wire::Faceplate::Panel => Some(Faceplate::Panel),
+        wire::Faceplate::Switch => Some(Faceplate::Switch),
+        wire::Faceplate::Terminals => Some(Faceplate::Terminals),
+    })
+}
+fn faceplate_wire(f: Option<Faceplate>) -> wire::Faceplate {
+    match f {
+        None => wire::Faceplate::None,
+        Some(Faceplate::Panel) => wire::Faceplate::Panel,
+        Some(Faceplate::Switch) => wire::Faceplate::Switch,
+        Some(Faceplate::Terminals) => wire::Faceplate::Terminals,
+    }
+}
+fn ports_read(list: capnp::struct_list::Reader<'_, wire::port::Owned>) -> capnp::Result<Vec<Port>> {
+    list.iter()
+        .map(|p| {
+            let half = text(p.get_half())?;
+            Ok(Port {
+                id: text(p.get_id())?,
+                label: text(p.get_label())?,
+                position: Some(p.get_position()).filter(|v| *v > 0),
+                poles: Some(p.get_poles() as u32).filter(|v| *v > 1),
+                half: Some(half).filter(|h| !h.is_empty()),
+            })
+        })
+        .collect()
+}
+fn ports_write(mut list: capnp::struct_list::Builder<'_, wire::port::Owned>, ports: &[Port]) {
+    for (i, p) in ports.iter().enumerate() {
+        let mut b = list.reborrow().get(i as u32);
+        b.set_id(&p.id);
+        b.set_label(&p.label);
+        b.set_position(p.position.unwrap_or(0));
+        b.set_poles(p.poles.unwrap_or(1).min(255) as u8);
+        b.set_half(p.half.as_deref().unwrap_or(""));
+    }
 }
 fn entity_write(mut b: wire::entity::Builder<'_>, e: &Entity) {
     b.set_id(&e.id);
     b.set_name(&e.name);
     b.set_kind(&e.kind);
     b.set_parent(e.parent.as_deref().unwrap_or(""));
-    let mut links = b.init_links(e.links.len() as u32);
+    let mut links = b.reborrow().init_links(e.links.len() as u32);
     for (i, l) in e.links.iter().enumerate() {
         let mut b = links.reborrow().get(i as u32);
         b.set_provider(&l.provider);
         b.set_kind(&l.kind);
         b.set_external_id(&l.external_id);
     }
+    b.set_faceplate(faceplate_wire(e.faceplate));
+    ports_write(b.init_ports(e.ports.len() as u32), &e.ports);
 }
 fn connection_read(r: wire::connection::Reader<'_>) -> capnp::Result<Connection> {
     Ok(Connection {
@@ -72,7 +120,9 @@ fn connection_read(r: wire::connection::Reader<'_>) -> capnp::Result<Connection>
             .get_endpoints()?
             .iter()
             .map(|ep| {
+                let port = text(ep.get_port())?;
                 Ok(Endpoint {
+                    port: Some(port).filter(|p| !p.is_empty()),
                     entity: text(ep.get_entity())?,
                     role: match ep
                         .get_role()
@@ -95,6 +145,7 @@ fn connection_write(mut b: wire::connection::Builder<'_>, c: &Connection) {
     for (i, ep) in c.endpoints.iter().enumerate() {
         let mut b = eps.reborrow().get(i as u32);
         b.set_entity(&ep.entity);
+        b.set_port(ep.port.as_deref().unwrap_or(""));
         b.set_role(match ep.role {
             Role::Source => wire::Role::Source,
             Role::Target => wire::Role::Target,
@@ -275,11 +326,16 @@ impl api::Server for Api {
         finish((|| {
             self.check(true)?;
             let p = params.get()?;
-            let item = entity_read(p.get_entity()?)?;
+            let mut item = entity_read(p.get_entity()?)?;
             let revision = self.mutate(p.get_expected_revision(), move |d| {
                 if let Some(old) = d.entities.iter_mut().find(|e| e.id == item.id) {
+                    // Ports belong to putPorts: keep what is stored.
+                    item.faceplate = old.faceplate;
+                    item.ports = std::mem::take(&mut old.ports);
                     *old = item;
                 } else {
+                    item.faceplate = None;
+                    item.ports.clear();
                     d.entities.push(item);
                 }
                 Ok(())
@@ -546,6 +602,31 @@ impl api::Server for Api {
             Ok(())
         })())
     }
+    fn put_ports(
+        &mut self,
+        params: api::PutPortsParams,
+        mut results: api::PutPortsResults,
+    ) -> Promise<(), capnp::Error> {
+        finish((|| {
+            self.check(true)?;
+            let p = params.get()?;
+            let id = text(p.get_entity())?;
+            let faceplate = faceplate_read(p.get_faceplate())?;
+            let ports = ports_read(p.get_ports()?)?;
+            let revision = self.mutate(p.get_expected_revision(), move |d| {
+                let e = d
+                    .entities
+                    .iter_mut()
+                    .find(|e| e.id == id)
+                    .ok_or_else(|| capnp::Error::failed("404: Entity not found".into()))?;
+                e.faceplate = faceplate;
+                e.ports = ports;
+                Ok(())
+            })?;
+            results.get().set_revision(revision);
+            Ok(())
+        })())
+    }
 }
 
 #[cfg(test)]
@@ -576,6 +657,8 @@ mod tests {
                 kind: "entity".into(),
                 external_id: "light.test".into(),
             }],
+            faceplate: None,
+            ports: Vec::new(),
         }
     }
     #[tokio::test(flavor = "current_thread")]
@@ -601,6 +684,7 @@ mod tests {
         assert!(c.delete_layer_request().send().promise.await.is_err());
         assert!(c.put_view_request().send().promise.await.is_err());
         assert!(c.delete_view_request().send().promise.await.is_err());
+        assert!(c.put_ports_request().send().promise.await.is_err());
         assert_eq!(load_snapshot(&app).unwrap().revision, 1);
         for rights in [["write"], ["owner"]] {
             assert!(
@@ -612,6 +696,87 @@ mod tests {
                     .is_ok()
             );
         }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn ports_round_trip_and_put_entity_keeps_them() {
+        let app = app();
+        let c = client(&app, &["read", "write"]);
+        let revision = |r: capnp::Result<u64>| r.unwrap();
+        let ports = vec![
+            Port {
+                id: "1".into(),
+                label: "20 A kitchen".into(),
+                position: Some(1),
+                poles: None,
+                half: None,
+            },
+            Port {
+                id: "3/5".into(),
+                label: "30 A dryer".into(),
+                position: Some(3),
+                poles: Some(2),
+                half: None,
+            },
+        ];
+        let mut req = c.put_ports_request();
+        req.get().set_expected_revision(1);
+        req.get().set_entity("panel");
+        req.get().set_faceplate(wire::Faceplate::Panel);
+        ports_write(req.get().init_ports(2), &ports);
+        let r = req.send().promise.await.unwrap();
+        assert_eq!(revision(Ok(r.get().unwrap().get_revision())), 2);
+        // putEntity (which carries no ports) renames without dropping them.
+        let mut req = c.get_entity_request();
+        req.get().set_id("panel");
+        let got = req.send().promise.await.unwrap();
+        let mut panel = entity_read(got.get().unwrap().get_entity().unwrap()).unwrap();
+        assert_eq!(panel.faceplate, Some(Faceplate::Panel));
+        assert_eq!(panel.ports, ports);
+        panel.name = "Main panel".into();
+        panel.ports.clear();
+        panel.faceplate = None;
+        let mut req = c.put_entity_request();
+        req.get().set_expected_revision(2);
+        entity_write(req.get().init_entity(), &panel);
+        req.send().promise.await.unwrap();
+        // An endpoint names a port; it survives the round trip.
+        let mut req = c.list_connections_request();
+        req.get().set_entity("panel");
+        let list = req.send().promise.await.unwrap();
+        let mut circuit =
+            connection_read(list.get().unwrap().get_connections().unwrap().get(0)).unwrap();
+        circuit
+            .endpoints
+            .iter_mut()
+            .find(|ep| ep.entity == "panel")
+            .unwrap()
+            .port = Some("3/5".into());
+        let mut req = c.put_connection_request();
+        req.get().set_expected_revision(3);
+        connection_write(req.get().init_connection(), &circuit);
+        req.send().promise.await.unwrap();
+        let doc = c.get_document_request().send().promise.await.unwrap();
+        let doc = document_read(doc.get().unwrap().get_document().unwrap()).unwrap();
+        let panel = doc.entities.iter().find(|e| e.id == "panel").unwrap();
+        assert_eq!((panel.name.as_str(), panel.ports.len()), ("Main panel", 2));
+        let c2 = doc.connections.iter().find(|x| x.id == circuit.id).unwrap();
+        assert_eq!(
+            c2.endpoints
+                .iter()
+                .find(|ep| ep.entity == "panel")
+                .unwrap()
+                .port
+                .as_deref(),
+            Some("3/5")
+        );
+        // Removing a port an endpoint still names is refused.
+        let mut req = c.put_ports_request();
+        req.get().set_expected_revision(4);
+        req.get().set_entity("panel");
+        req.get().set_faceplate(wire::Faceplate::Panel);
+        ports_write(req.get().init_ports(1), &ports[..1]);
+        let err = req.send().promise.await.err().unwrap().to_string();
+        assert!(err.contains("400") && err.contains("3/5"), "{err}");
     }
     #[tokio::test(flavor = "current_thread")]
     async fn entity_links_paging_validation_and_revision_conflicts() {
@@ -721,10 +886,12 @@ mod tests {
                 Endpoint {
                     entity: "lamp".into(),
                     role: Role::Target,
+                    port: None,
                 },
                 Endpoint {
                     entity: "sensor".into(),
                     role: Role::Source,
+                    port: None,
                 },
             ],
         };

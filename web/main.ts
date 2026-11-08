@@ -2,19 +2,42 @@ import init, { compute, move_node, preview } from "./pkg/stufftracker_core";
 declare const WASM_BASE64: string;
 declare const WORKER_SOURCE: string;
 type Point = { x: number; y: number };
+type Faceplate = "panel" | "switch" | "terminals";
+type Port = {
+  id: string;
+  label?: string;
+  position?: number;
+  poles?: number;
+  half?: "A" | "B";
+};
 type Entity = {
   id: string;
   name: string;
   kind: string;
   parent: string | null;
   links: { provider: string; kind: string; external_id: string }[];
+  faceplate?: Faceplate;
+  ports?: Port[];
 };
 type Role = "source" | "target" | "peer";
+type Endpoint = { entity: string; role: Role; port?: string };
 type Connection = {
   id: string;
   name: string;
   layer: string;
-  endpoints: { entity: string; role: Role }[];
+  endpoints: Endpoint[];
+};
+type Direction = "both" | "upstream" | "downstream";
+type Focus = { entities: string[]; hops?: number; direction?: Direction };
+type PortBox = {
+  id: string;
+  label: string;
+  position: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  side: "left" | "right" | "either";
 };
 type DocumentData = {
   entities: Entity[];
@@ -27,6 +50,8 @@ type View = {
   positions: Record<string, Point>;
   collapsed: string[];
   hidden_layers: string[];
+  faceplates?: string[];
+  focus?: Focus;
 };
 type Layout = {
   attachment_hints: Record<string, Point>;
@@ -42,6 +67,12 @@ type Layout = {
     depth: number;
     container: boolean;
     collapsed: boolean;
+    faceplate?: {
+      kind: Faceplate;
+      ports: PortBox[];
+      empty: PortBox[];
+      unassigned?: PortBox;
+    };
   }[];
   bundles: {
     layer: string;
@@ -73,6 +104,8 @@ let offline = false,
   dirty = false,
   savedViews: SavedView[] = [],
   current: Layout;
+// Things picked with shift-click or a shift-drag lasso, for "show only these".
+let picked = new Set<string>();
 let camera = { x: 0, y: 0, scale: 1 },
   first = true;
 const svg = $("graph") as unknown as SVGSVGElement;
@@ -103,6 +136,56 @@ function applyLayout(layout: Layout) {
   view.positions = current.positions;
   view.layout_version = current.layout_version;
 }
+function setFocus(focus: Focus | null) {
+  if (focus) view.focus = focus;
+  else delete view.focus;
+  picked.clear();
+  render();
+  fit();
+}
+const nameOf = (id: string) =>
+  doc.entities.find((e) => e.id === id)?.name || id;
+function renderBars() {
+  const f = view.focus;
+  const bar = $("focus-bar");
+  bar.hidden = !f;
+  if (f) {
+    const names = f.entities.map(nameOf);
+    const what =
+      names.length > 2
+        ? `${names.slice(0, 2).join(", ")} +${names.length - 2}`
+        : names.join(", ");
+    const dir = f.direction || "both";
+    bar.innerHTML = `<span class="focus-label">${dir === "upstream" ? "What feeds" : dir === "downstream" ? "What is fed by" : "Around"} <b>${esc(what)}</b> · ${current.nodes.filter((n) => !n.container || n.collapsed).length} shown</span><span class="seg" role="group" aria-label="Direction">${(["both", "upstream", "downstream"] as const).map((d) => `<button data-dir="${d}" class="${d === dir ? "on" : ""}">${{ both: "↔ Both", upstream: "↑ Feeds", downstream: "↓ Fed" }[d]}</button>`).join("")}</span><span class="seg" role="group" aria-label="Hops">${[1, 2, 3, 0].map((h) => `<button data-hops="${h}" class="${(f.hops ?? 0) === h ? "on" : ""}">${h || "All"}</button>`).join("")}</span><button id="exit-focus">✕ Show everything</button>`;
+    bar
+      .querySelectorAll<HTMLButtonElement>("[data-dir]")
+      .forEach(
+        (b) =>
+          (b.onclick = () =>
+            setFocus({ ...f, direction: b.dataset.dir as Direction })),
+      );
+    bar
+      .querySelectorAll<HTMLButtonElement>("[data-hops]")
+      .forEach(
+        (b) =>
+          (b.onclick = () =>
+            setFocus({ ...f, hops: Number(b.dataset.hops) || undefined })),
+      );
+    $("exit-focus").onclick = () => setFocus(null);
+  }
+  const pick = $("pick-bar");
+  pick.hidden = !picked.size;
+  if (picked.size) {
+    pick.innerHTML = `<span>${picked.size} selected</span><button id="focus-picked" class="primary">Show only these</button><button id="clear-picked">Clear</button>`;
+    $("focus-picked").onclick = () =>
+      setFocus({ entities: [...picked], hops: 0, direction: "both" });
+    $("clear-picked").onclick = () => {
+      picked.clear();
+      renderScene();
+      renderBars();
+    };
+  }
+}
 function render() {
   layoutGeneration++;
   delete svg.dataset.layoutPending;
@@ -111,6 +194,7 @@ function render() {
   renderTree();
   renderLayers();
   renderInspector();
+  renderBars();
 
   $<HTMLButtonElement>("save-document").disabled = !writable || !dirty;
   if (first) {
@@ -131,7 +215,7 @@ function renderScene() {
     const e = doc.entities.find((e) => e.id === n.id)!;
     const fills = ["#edf2e7", "#f5f8f0", "#fcfdf9"];
     const headers = ["#e0ead9", "#e9f0e1", "#f0f5e9"];
-    content += `<g class="node space ${selected === n.id ? "selected" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="space-body" width="${n.width}" height="${n.height}" rx="12" fill="${fills[Math.min(n.depth, 2)]}"/><g class="space-header"><path d="M12 0 H${n.width - 12} Q${n.width} 0 ${n.width} 12 V52 H0 V12 Q0 0 12 0 Z" fill="${headers[Math.min(n.depth, 2)]}"/><path class="space-divider" d="M0 52 H${n.width}"/><text class="glyph" x="15" y="35">${icon(e.kind)}</text><text class="kind" x="43" y="18">${esc(e.kind.toUpperCase())}</text><text class="name" x="43" y="36">${esc(e.name)}</text><text class="space-count" x="${n.width - 50}" y="32" text-anchor="end">${n.children} inside</text>${n.children ? `<g class="fold" data-fold="${esc(n.id)}"><rect x="${n.width - 34}" y="16" width="20" height="20" rx="5"/><text x="${n.width - 29}" y="30">−</text></g>` : ""}</g></g>`;
+    content += `<g class="node space ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="space-body" width="${n.width}" height="${n.height}" rx="12" fill="${fills[Math.min(n.depth, 2)]}"/><g class="space-header"><path d="M12 0 H${n.width - 12} Q${n.width} 0 ${n.width} 12 V52 H0 V12 Q0 0 12 0 Z" fill="${headers[Math.min(n.depth, 2)]}"/><path class="space-divider" d="M0 52 H${n.width}"/><text class="glyph" x="15" y="35">${icon(e.kind)}</text><text class="kind" x="43" y="18">${esc(e.kind.toUpperCase())}</text><text class="name" x="43" y="36">${esc(e.name)}</text><text class="space-count" x="${n.width - 50}" y="32" text-anchor="end">${n.children} inside</text>${n.children ? `<g class="fold" data-fold="${esc(n.id)}"><rect x="${n.width - 34}" y="16" width="20" height="20" rx="5"/><text x="${n.width - 29}" y="30">−</text></g>` : ""}</g></g>`;
   }
   for (const b of current.bundles) {
     const layer = doc.layers.find((l) => l.id === b.layer)!;
@@ -150,7 +234,11 @@ function renderScene() {
   }
   for (const n of current.nodes.filter((n) => !n.container || n.collapsed)) {
     const e = doc.entities.find((e) => e.id === n.id)!;
-    content += `<g class="node ${n.collapsed ? "collapsed-space" : ""} ${selected === n.id ? "selected" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="${n.width}" height="${n.height}" rx="9"/><text class="glyph" x="15" y="42">${icon(e.kind)}</text><text class="kind" x="45" y="23">${esc(e.kind.toUpperCase())}</text><text class="name" x="45" y="44">${esc(e.name.length > 19 ? e.name.slice(0, 18) + "…" : e.name)}</text>${n.children ? `<g class="fold" data-fold="${esc(e.id)}"><rect x="173" y="10" width="19" height="19" rx="4" fill="#e2edd8"/><text x="178" y="24">+</text></g><text class="kind" x="16" y="62">${n.children} hidden inside</text>` : ""}</g>`;
+    if (n.faceplate) {
+      content += faceplateSvg(n, e);
+      continue;
+    }
+    content += `<g class="node ${n.collapsed ? "collapsed-space" : ""} ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="${n.width}" height="${n.height}" rx="9"/><text class="glyph" x="15" y="42">${icon(e.kind)}</text><text class="kind" x="45" y="23">${esc(e.kind.toUpperCase())}</text><text class="name" x="45" y="44">${esc(e.name.length > 19 ? e.name.slice(0, 18) + "…" : e.name)}</text>${n.children ? `<g class="fold" data-fold="${esc(e.id)}"><rect x="173" y="10" width="19" height="19" rx="4" fill="#e2edd8"/><text x="178" y="24">+</text></g><text class="kind" x="16" y="62">${n.children} hidden inside</text>` : ""}</g>`;
   }
   document.getElementById("scene")!.innerHTML = content;
   applyCamera();
@@ -161,6 +249,50 @@ function renderScene() {
   $("counts").textContent =
     `${current.nodes.length} of ${doc.entities.length} things · ${routed} visible connections${missing ? ` · ${missing} need more routing space` : ""}`;
   $("counts").classList.toggle("error", missing > 0);
+}
+// A faceplate: the header, then each port (or panel breaker) as a slot in
+// its physical position, with what it feeds; Rust supplies the geometry.
+function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
+  const f = n.faceplate!;
+  const fed = (port: string) =>
+    doc.connections
+      .filter((c) =>
+        c.endpoints.some((ep) => ep.entity === e.id && ep.port === port),
+      )
+      .flatMap((c) =>
+        c.endpoints
+          .filter((ep) => ep.entity !== e.id)
+          .map((ep) => doc.entities.find((x) => x.id === ep.entity)!.name),
+      );
+  const slot = (b: PortBox, cls: string, title: string) => {
+    const text = [b.label, ...(b.id ? fed(b.id) : [])].filter(Boolean)[0] || "";
+    const max = Math.max(4, Math.floor((b.width - 44) / 6.2));
+    const small = b.height < 14;
+    return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/><text class="slot-pos" x="${b.x + 5}" y="${b.y + (small ? 9 : 13)}">${esc(b.position || "·")}</text><text class="slot-label ${small ? "tiny" : ""}" x="${b.x + 38}" y="${b.y + (small ? 9 : 13)}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text><title>${esc(title)}</title></g>`;
+  };
+  let body = "";
+  for (const b of f.empty)
+    body += slot(b, "empty", `Space ${b.position}: empty`);
+  for (const b of f.ports) {
+    const names = fed(b.id);
+    body += slot(
+      b,
+      names.length ? "used" : "spare",
+      `${b.position ? b.position + " · " : ""}${b.id}${b.label ? " · " + b.label : ""}${names.length ? "\n→ " + names.join(", ") : "\nNothing connected"}`,
+    );
+  }
+  if (f.unassigned)
+    body += slot(
+      f.unassigned,
+      "unassigned",
+      "Connections not yet assigned to a port",
+    );
+  const kindLabel = {
+    panel: "PANEL",
+    switch: "SWITCH",
+    terminals: "TERMINALS",
+  }[f.kind];
+  return `<g class="node faceplate ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="${n.width}" height="${n.height}" rx="9"/><text class="glyph" x="15" y="34">${icon(e.kind)}</text><text class="kind" x="45" y="20">${esc(e.kind.toUpperCase())} · ${kindLabel}</text><text class="name" x="45" y="39">${esc(e.name.length > 34 ? e.name.slice(0, 33) + "…" : e.name)}</text>${body}</g>`;
 }
 function renderTree() {
   const query = $<HTMLInputElement>("search").value.toLowerCase();
@@ -184,6 +316,111 @@ function renderLayers() {
     )
     .join("");
 }
+const portOrder = (a: Port, b: Port) =>
+  (a.position ?? 1e9) - (b.position ?? 1e9) ||
+  (a.half || "").localeCompare(b.half || "") ||
+  a.id.localeCompare(b.id, undefined, { numeric: true });
+function spaces(e: Entity, p: Port) {
+  if (!p.position) return "";
+  const step = e.faceplate === "panel" ? 2 : 1;
+  return (
+    Array.from(
+      { length: Math.max(1, p.poles || 1) },
+      (_, k) => p.position! + k * step,
+    ).join("/") + (p.half || "")
+  );
+}
+// What each port of `e` connects to: its schedule, plus the connections not
+// yet assigned to a port.
+function schedule(e: Entity) {
+  const linked = (c: Connection) =>
+    c.endpoints
+      .filter((ep) => ep.entity !== e.id)
+      .map((ep) => doc.entities.find((x) => x.id === ep.entity)!.name);
+  const mine = doc.connections.filter((c) =>
+    c.endpoints.some((ep) => ep.entity === e.id),
+  );
+  const at = (c: Connection) =>
+    c.endpoints.find((ep) => ep.entity === e.id)!.port;
+  return {
+    rows: [...(e.ports || [])].sort(portOrder).map((p) => ({
+      port: p,
+      position: spaces(e, p),
+      connections: mine
+        .filter((c) => at(c) === p.id)
+        .map((c) => ({ c, to: linked(c) })),
+    })),
+    unassigned: mine.filter((c) => !at(c)).map((c) => ({ c, to: linked(c) })),
+  };
+}
+function scheduleHtml(e: Entity) {
+  if (!e.ports?.length) return "";
+  const { rows, unassigned } = schedule(e);
+  const layer = (c: Connection) => doc.layers.find((l) => l.id === c.layer)!;
+  const cell = (list: { c: Connection; to: string[] }[]) =>
+    list.length
+      ? list
+          .map(
+            ({ c, to }) =>
+              `<div><span class="swatch" style="background:${esc(layer(c).color)}"></span>${esc(to.join(", "))}<small>${esc(c.name)}</small></div>`,
+          )
+          .join("")
+      : '<span class="muted">spare</span>';
+  return `<div class="schedule"><div class="schedule-head"><h3>${e.faceplate === "panel" ? "Panel schedule" : "Ports"}</h3><button type="button" id="print-schedule">Print</button></div><table><thead><tr><th>${e.faceplate === "panel" ? "Space" : "#"}</th><th>Port</th><th>Connected to</th></tr></thead><tbody>${rows
+    .map(
+      (r) =>
+        `<tr><td>${esc(r.position)}</td><td><b>${esc(r.port.id)}</b>${r.port.label ? `<small>${esc(r.port.label)}</small>` : ""}</td><td>${cell(r.connections)}</td></tr>`,
+    )
+    .join(
+      "",
+    )}${unassigned.length ? `<tr class="unassigned"><td>?</td><td>Not assigned</td><td>${cell(unassigned)}</td></tr>` : ""}</tbody></table></div>`;
+}
+// The selected thing's connections; with ports, each can be assigned one.
+function connectionsHtml(e: Entity) {
+  const mine = doc.connections.filter((c) =>
+    c.endpoints.some((ep) => ep.entity === e.id),
+  );
+  if (!mine.length) return "";
+  const ports = [...(e.ports || [])].sort(portOrder);
+  return `<div class="conn-list"><h3>Connections</h3>${mine
+    .map((c) => {
+      const layer = doc.layers.find((l) => l.id === c.layer)!;
+      const ep = c.endpoints.find((ep) => ep.entity === e.id)!;
+      const others = c.endpoints
+        .filter((x) => x.entity !== e.id)
+        .map((x) => {
+          const other = doc.entities.find((n) => n.id === x.entity)!;
+          return `${esc(other.name)}${x.port ? ` <small>@${esc(x.port)}</small>` : ""}`;
+        })
+        .join(", ");
+      const arrow =
+        ep.role === "source" ? "→" : ep.role === "target" ? "←" : "↔";
+      const select =
+        writable && ports.length
+          ? `<select data-assign="${esc(c.id)}" aria-label="Port for ${esc(c.name)}"><option value="">port…</option>${ports.map((p) => `<option value="${esc(p.id)}" ${ep.port === p.id ? "selected" : ""}>${esc(p.id)}${p.label ? " · " + esc(p.label) : ""}</option>`).join("")}</select>`
+          : ep.port
+            ? `<small>@${esc(ep.port)}</small>`
+            : "";
+      return `<div class="conn"><span class="swatch" style="background:${esc(layer.color)}"></span><div><div>${arrow} ${others}</div><small>${esc(c.name)}</small></div>${select}</div>`;
+    })
+    .join("")}</div>`;
+}
+function portEditorHtml(e: Entity) {
+  const draft = draftPorts?.entity === e.id ? draftPorts : null;
+  const ports: (Port & { orig?: string })[] = draft
+    ? draft.ports
+    : (e.ports || []).map((p) => ({ ...p, orig: p.id }));
+  const faceplate = draft ? draft.faceplate : e.faceplate;
+  return `<details class="port-editor" ${portEditorOpen ? "open" : ""}><summary>Physical layout &amp; ports</summary><form id="ports-form"><label class="field">Layout<select name="faceplate"><option value="">None</option>${(["panel", "switch", "terminals"] as const).map((k) => `<option value="${k}" ${faceplate === k ? "selected" : ""}>${{ panel: "Breaker panel", switch: "Network switch", terminals: "Terminal strip" }[k]}</option>`).join("")}</select></label><table class="port-rows"><thead><tr><th>ID</th><th title="Starting space or port number">Pos</th><th title="Spaces covered (2 for a 240 V breaker)">Poles</th><th title="Tandem half">½</th><th>Label</th><th></th></tr></thead><tbody>${ports
+    .map(
+      (p, i) =>
+        `<tr data-row="${i}" ${p.orig ? `data-orig="${esc(p.orig)}"` : ""}><td><input name="id" value="${esc(p.id)}" required maxlength="40"></td><td><input name="position" type="number" min="1" max="999" value="${p.position ?? ""}"></td><td><select name="poles">${[1, 2, 3].map((n) => `<option ${(p.poles || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select></td><td><select name="half"><option value=""></option><option ${p.half === "A" ? "selected" : ""}>A</option><option ${p.half === "B" ? "selected" : ""}>B</option></select></td><td><input name="label" value="${esc(p.label || "")}" maxlength="200"></td><td><button type="button" class="remove-port" aria-label="Remove port ${esc(p.id)}">✕</button></td></tr>`,
+    )
+    .join(
+      "",
+    )}</tbody></table><div class="button-row"><button type="button" id="add-port">＋ Port</button><button type="button" id="number-ports" title="Add numbered ports up to a count">＋ Numbered…</button><button>Apply ports</button></div></form></details>`;
+}
+let portEditorOpen = false;
 function renderInspector() {
   const e = doc.entities.find((e) => e.id === selected);
   if (!e) {
@@ -201,10 +438,26 @@ function renderInspector() {
         changed = true;
       }
   }
+  const hasLayout = !!(e.ports?.length || e.faceplate);
+  const leaf =
+    !doc.entities.some((n) => n.parent === e.id) && e.kind !== "space";
+  const kinds = [
+    ...new Set([
+      "space",
+      "device",
+      "equipment",
+      "service",
+      ...doc.entities.map((n) => n.kind),
+    ]),
+  ];
   $("inspector").innerHTML =
-    `<span class="eyebrow">SELECTED ${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${doc.connections.filter((c) => c.endpoints.some((ep) => ep.entity === e.id)).length} connections · ${doc.entities.filter((n) => n.parent === e.id).length} children</p>${e.links.map((l) => `<div class="external-link"><b>${esc(l.provider.replaceAll("_", " ").toUpperCase())} · ${esc(l.kind)}</b>${esc(l.external_id)}</div>`).join("")}${
+    `<span class="eyebrow">SELECTED ${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${doc.connections.filter((c) => c.endpoints.some((ep) => ep.entity === e.id)).length} connections · ${doc.entities.filter((n) => n.parent === e.id).length} children</p>${e.links.map((l) => `<div class="external-link"><b>${esc(l.provider.replaceAll("_", " ").toUpperCase())} · ${esc(l.kind)}</b>${esc(l.external_id)}</div>`).join("")}<div class="focus-actions"><button data-focus="both" title="Show this and what it connects to">Show only this</button><button data-focus="upstream" title="Trace everything that feeds this">↑ What feeds this</button><button data-focus="downstream" title="Trace everything this feeds">↓ What this feeds</button></div>${
+      hasLayout && leaf
+        ? `<label class="toggle"><input type="checkbox" id="faceplate-toggle" ${view.faceplates?.includes(e.id) ? "checked" : ""}> Show physical layout</label>`
+        : ""
+    }${scheduleHtml(e)}${connectionsHtml(e)}${
       writable
-        ? `<form id="entity-form"><label class="field">Name<input name="name" value="${esc(e.name)}" required maxlength="150"></label><label class="field">Type<select name="kind">${["space", "device", "equipment", "service"].map((k) => `<option ${k === e.kind ? "selected" : ""}>${k}</option>`).join("")}</select></label><label class="field">Parent<select name="parent"><option value="">Top level</option>${doc.entities
+        ? `<form id="entity-form"><label class="field">Name<input name="name" value="${esc(e.name)}" required maxlength="150"></label><label class="field">Type<input name="kind" list="kinds" value="${esc(e.kind)}" required maxlength="40"><datalist id="kinds">${kinds.map((k) => `<option value="${esc(k)}">`).join("")}</datalist></label><label class="field">Parent<select name="parent"><option value="">Top level</option>${doc.entities
             .filter((n) => !descendants.has(n.id))
             .map(
               (n) =>
@@ -212,7 +465,7 @@ function renderInspector() {
             )
             .join(
               "",
-            )}</select></label><div class="button-row"><button>Apply</button><button type="button" id="delete-entity" class="danger">Delete${descendants.size > 1 ? ` (${descendants.size})` : ""}</button></div></form><form id="connect-form" class="connect-form"><h3>Connect this thing</h3><label class="field">Connection name<input name="name" required placeholder="e.g. Office power"></label><label class="field">Layer<select name="layer">${doc.layers.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("")}</select></label><label class="field">Other endpoints<select name="targets" multiple required size="4">${doc.entities
+            )}</select></label><div class="button-row"><button>Apply</button><button type="button" id="delete-entity" class="danger">Delete${descendants.size > 1 ? ` (${descendants.size})` : ""}</button></div></form>${leaf ? portEditorHtml(e) : ""}<form id="connect-form" class="connect-form"><h3>Connect this thing</h3><label class="field">Connection name<input name="name" required placeholder="e.g. Office power"></label><label class="field">Layer<select name="layer">${doc.layers.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("")}</select></label><label class="field">Other endpoints<select name="targets" multiple required size="4">${doc.entities
             .filter((n) => n.id !== e.id)
             .map((n) => `<option value="${esc(n.id)}">${esc(n.name)}</option>`)
             .join(
@@ -231,7 +484,7 @@ function renderInspector() {
         return;
       }
       e.name = name;
-      e.kind = String(f.get("kind"));
+      e.kind = String(f.get("kind")).trim() || e.kind;
       const parent = String(f.get("parent")) || null;
       if (e.parent !== parent) delete view.positions[e.id];
       e.parent = parent;
@@ -270,6 +523,202 @@ function renderInspector() {
       selected = "";
       markDirty();
     };
+  document.querySelectorAll<HTMLButtonElement>("[data-focus]").forEach(
+    (b) =>
+      (b.onclick = () => {
+        const direction = b.dataset.focus as Direction;
+        setFocus({
+          entities: [e.id],
+          hops: direction === "both" ? 1 : undefined,
+          direction,
+        });
+      }),
+  );
+  const toggle = $<HTMLInputElement>("faceplate-toggle");
+  if (toggle)
+    toggle.onchange = () => {
+      const set = new Set(view.faceplates || []);
+      if (toggle.checked) set.add(e.id);
+      else set.delete(e.id);
+      view.faceplates = [...set];
+      if (toggle.checked) settle(e.id);
+      render();
+    };
+  const print = $("print-schedule");
+  if (print) print.onclick = () => printSchedule(e);
+  document.querySelectorAll<HTMLSelectElement>("[data-assign]").forEach(
+    (sel) =>
+      (sel.onchange = () =>
+        tryEdit((d) => {
+          const c = d.connections.find((c) => c.id === sel.dataset.assign)!;
+          const ep = c.endpoints.find((ep) => ep.entity === e.id)!;
+          if (sel.value) ep.port = sel.value;
+          else delete ep.port;
+        })),
+  );
+  const portsForm = $<HTMLFormElement>("ports-form");
+  if (portsForm) {
+    const details = portsForm.closest("details")!;
+    details.ontoggle = () => (portEditorOpen = details.open);
+    const rows = (): (Port & { orig?: string })[] =>
+      [...portsForm.querySelectorAll<HTMLTableRowElement>("tr[data-row]")].map(
+        (tr) => {
+          const v = (n: string) =>
+            tr
+              .querySelector<HTMLInputElement | HTMLSelectElement>(
+                `[name=${n}]`,
+              )!
+              .value.trim();
+          const p: Port & { orig?: string } = {
+            id: v("id"),
+            orig: tr.dataset.orig,
+          };
+          if (v("label")) p.label = v("label");
+          if (v("position")) p.position = Number(v("position"));
+          if (Number(v("poles")) > 1) p.poles = Number(v("poles"));
+          if (v("half")) p.half = v("half") as "A" | "B";
+          return p;
+        },
+      );
+    const redraw = (ports: (Port & { orig?: string })[]) => {
+      draftPorts = {
+        entity: e.id,
+        faceplate:
+          (new FormData(portsForm).get("faceplate") as Faceplate) || undefined,
+        ports,
+      };
+      renderInspector();
+    };
+    portsForm.querySelectorAll<HTMLButtonElement>(".remove-port").forEach(
+      (b) =>
+        (b.onclick = () => {
+          const i = Number(b.closest("tr")!.dataset.row);
+          redraw(rows().filter((_, k) => k !== i));
+        }),
+    );
+    $("add-port").onclick = () => {
+      const list = rows();
+      const next =
+        Math.max(
+          0,
+          ...list.map((p) => (p.position || 0) + (p.poles || 1) - 1),
+        ) + 1;
+      redraw([...list, { id: String(next), position: next }]);
+    };
+    $("number-ports").onclick = () => {
+      const n = Number(prompt("Number of ports or panel spaces?", "24"));
+      if (!Number.isInteger(n) || n < 1 || n > 256) return;
+      const list = rows();
+      const used = new Set(list.map((p) => p.position));
+      for (let i = 1; i <= n; i++)
+        if (!used.has(i) && !list.some((p) => p.id === String(i)))
+          list.push({ id: String(i), position: i });
+      redraw(list.sort(portOrder));
+    };
+    portsForm.onsubmit = (ev) => {
+      ev.preventDefault();
+      const list = rows();
+      const faceplate =
+        (new FormData(portsForm).get("faceplate") as Faceplate) || undefined;
+      let unassigned = 0;
+      const ok = tryEdit((d) => {
+        const target = d.entities.find((x) => x.id === e.id)!;
+        // Renamed ports carry their connections; removed ones release them.
+        const renamed = new Map(
+          list.filter((p) => p.orig).map((p) => [p.orig!, p.id]),
+        );
+        for (const c of d.connections)
+          for (const ep of c.endpoints)
+            if (ep.entity === e.id && ep.port) {
+              const now =
+                renamed.get(ep.port) ??
+                (list.some((p) => p.id === ep.port) ? ep.port : undefined);
+              if (now) ep.port = now;
+              else {
+                delete ep.port;
+                unassigned++;
+              }
+            }
+        target.ports = list.map(({ orig, ...p }) => p);
+        if (!target.ports.length) delete target.ports;
+        if (faceplate) target.faceplate = faceplate;
+        else delete target.faceplate;
+      });
+      if (ok) {
+        draftPorts = null;
+        if (unassigned)
+          status(
+            `${unassigned} connection(s) lost their port and are now unassigned`,
+          );
+      }
+    };
+  }
+}
+// A faceplate is larger than the card it replaces: re-drop it where it is
+// so its neighbours are pushed aside (in the full view, even mid-focus).
+function settle(id: string) {
+  const full = { ...view, focus: undefined };
+  const at: Layout = JSON.parse(
+    preview(JSON.stringify({ document: doc, view: full })),
+  );
+  const n = at.nodes.find((n) => n.id === id);
+  if (!n) return;
+  const moved: View = JSON.parse(
+    move_node(
+      JSON.stringify({
+        document: doc,
+        view: full,
+        entity: id,
+        position: n.position,
+        dragging: false,
+      }),
+    ),
+  );
+  view = { ...moved, focus: view.focus };
+  if (!view.focus) delete view.focus;
+}
+// Port edits are drafted in the form until applied.
+let draftPorts: {
+  entity: string;
+  faceplate?: Faceplate;
+  ports: (Port & { orig?: string })[];
+} | null = null;
+// Apply an inventory edit only if the Rust engine accepts the result.
+function tryEdit(change: (d: DocumentData) => void) {
+  const next = structuredClone(doc);
+  change(next);
+  try {
+    compute(JSON.stringify({ document: next, view }));
+  } catch (err) {
+    status(String((err as Error).message || err), true);
+    renderInspector();
+    return false;
+  }
+  doc = next;
+  markDirty();
+  return true;
+}
+function printSchedule(e: Entity) {
+  const { rows, unassigned } = schedule(e);
+  const cell = (list: { c: Connection; to: string[] }[]) =>
+    list
+      .map(
+        ({ c, to }) => `${esc(to.join(", "))}<br><small>${esc(c.name)}</small>`,
+      )
+      .join("<hr>") || "spare";
+  const w = window.open("", "_blank");
+  if (!w) return status("Allow pop-ups to print the schedule", true);
+  w.document.write(
+    `<!doctype html><meta charset="utf-8"><title>${esc(e.name)}</title><style>body{font:13px system-ui,sans-serif;margin:24px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:4px 6px;text-align:left;vertical-align:top}small{color:#555}hr{border:0;border-top:1px dotted #bbb;margin:3px 0}</style><h1>${esc(e.name)}</h1><table><tr><th>${e.faceplate === "panel" ? "Space" : "#"}</th><th>Port</th><th>Label</th><th>Connected to</th></tr>${rows
+      .map(
+        (r) =>
+          `<tr><td>${esc(r.position)}</td><td>${esc(r.port.id)}</td><td>${esc(r.port.label || "")}</td><td>${cell(r.connections)}</td></tr>`,
+      )
+      .join(
+        "",
+      )}${unassigned.length ? `<tr><td>?</td><td colspan=2>Not assigned to a port</td><td>${cell(unassigned)}</td></tr>` : ""}</table><script>print()<\/script>`,
+  );
+  w.document.close();
 }
 function markDirty() {
   dirty = true;
@@ -308,14 +757,16 @@ function fit() {
     minY = Math.min(...ps.map((p) => p.y)) - 40;
   const maxX = Math.max(...ps.map((p) => p.x)) + 40,
     maxY = Math.max(...ps.map((p) => p.y)) + 80;
+  // Keep clear of the focus bar floating over the top of the canvas.
+  const top = view.focus ? ($("focus-bar").offsetHeight || 40) + 24 : 20;
   camera.scale = Math.min(
     1.2,
     (box.width - 30) / (maxX - minX),
-    (box.height - 40) / (maxY - minY),
+    (box.height - top - 20) / (maxY - minY),
   );
   camera.x =
     (box.width - (maxX - minX) * camera.scale) / 2 - minX * camera.scale;
-  camera.y = 20 - minY * camera.scale;
+  camera.y = top - minY * camera.scale;
   applyCamera();
 }
 function zoom(mult: number, x?: number, y?: number) {
@@ -458,6 +909,7 @@ function startPinch() {
 }
 function endPointer(ev: PointerEvent) {
   if (!pointers.delete(ev.pointerId)) return;
+  finishLasso();
   // Land the drag where the pointer let go.
   finishDrag();
   if (pinch) {
@@ -489,6 +941,16 @@ svg.addEventListener("pointerdown", (ev) => {
   }
   let id = target.closest("[data-id]")?.getAttribute("data-id") || null;
   const r = svg.getBoundingClientRect();
+  // Shift picks: click toggles a thing, dragging the canvas draws a lasso.
+  if (ev.shiftKey) {
+    if (id) {
+      if (picked.has(id)) picked.delete(id);
+      else picked.add(id);
+      renderScene();
+      renderBars();
+    } else lasso = { start: pointerPoint(ev), end: pointerPoint(ev) };
+    return;
+  }
   if (id) {
     selected = id;
     renderTree();
@@ -500,6 +962,11 @@ svg.addEventListener("pointerdown", (ev) => {
     const node = current.nodes.find((n) => n.id === id)!;
     if (node.container && !node.collapsed && !target.closest(".space-header"))
       id = null;
+    // A focus is laid out compactly for reading; arrange the full view.
+    if (view.focus && id) {
+      id = null;
+      status("Exit the focus to rearrange things");
+    }
   }
   if (id) beginDrag();
   drag = {
@@ -511,9 +978,55 @@ svg.addEventListener("pointerdown", (ev) => {
   };
   svg.setPointerCapture(ev.pointerId);
 });
+let lasso: { start: Point; end: Point } | null = null;
+function drawLasso() {
+  const el = document.getElementById("lasso")!;
+  if (!lasso) return el.setAttribute("visibility", "hidden");
+  const { start: a, end: b } = lasso;
+  el.setAttribute("x", String(Math.min(a.x, b.x)));
+  el.setAttribute("y", String(Math.min(a.y, b.y)));
+  el.setAttribute("width", String(Math.abs(a.x - b.x)));
+  el.setAttribute("height", String(Math.abs(a.y - b.y)));
+  el.setAttribute("visibility", "visible");
+}
+// Pick every thing (not the spaces enclosing it) the lasso touches.
+function finishLasso() {
+  if (!lasso) return;
+  const toWorld = (p: Point) => ({
+    x: (p.x - camera.x) / camera.scale,
+    y: (p.y - camera.y) / camera.scale,
+  });
+  const a = toWorld(lasso.start),
+    b = toWorld(lasso.end);
+  const [x0, x1, y0, y1] = [
+    Math.min(a.x, b.x),
+    Math.max(a.x, b.x),
+    Math.min(a.y, b.y),
+    Math.max(a.y, b.y),
+  ];
+  if (x1 - x0 > 2 || y1 - y0 > 2)
+    for (const n of current.nodes)
+      if (
+        (!n.container || n.collapsed) &&
+        n.position.x < x1 &&
+        n.position.x + n.width > x0 &&
+        n.position.y < y1 &&
+        n.position.y + n.height > y0
+      )
+        picked.add(n.id);
+  lasso = null;
+  drawLasso();
+  renderScene();
+  renderBars();
+}
 svg.addEventListener("pointermove", (ev) => {
   if (!pointers.has(ev.pointerId)) return;
   pointers.set(ev.pointerId, pointerPoint(ev));
+  if (lasso) {
+    lasso.end = pointerPoint(ev);
+    drawLasso();
+    return;
+  }
   if (pinch) {
     const { center, distance } = pinchGeometry();
     camera.scale = Math.max(

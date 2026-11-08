@@ -43,8 +43,27 @@ automation. Subsequent boots preserve your data.
   name/type/parent edits in the inspector, or add a directed or undirected
   connection. Multiple targets make a hyperedge. Delete removes a subtree and
   prunes affected endpoints. **Save changes** commits inventory edits to SQLite.
-- **Save view** stores positions, folded branches, and layer visibility separately
-  from inventory data. Selecting a saved view and saving updates it.
+- **Physical layouts.** A thing can carry ports: switch ports, breaker-panel
+  spaces, or controller terminals. Edit them under **Physical layout & ports**:
+  pick a layout (breaker panel, network switch, terminal strip), add ports one
+  at a time or numbered in bulk, and give each an ID, starting position, pole
+  count, tandem half (A/B) and label. Panels number spaces odd down the left
+  and even down the right; a breaker of N poles covers position, position+2, …
+  on its side (a 240 V breaker is 2), and tandem halves share one space.
+  Connections are assigned a port from the inspector's connection list. The
+  inspector shows the port schedule (printable), and **Show physical layout**
+  draws the thing as its faceplate, with each wire leaving from its own port
+  and unassigned connections gathered on a "not assigned" row.
+- **Focus.** **Show only this** shows a thing and what is one connection away;
+  **↑ What feeds this** and **↓ What this feeds** trace sources or targets
+  through directed connections. The focus bar changes direction and hops
+  (1, 2, 3, all) and **Show everything** leaves it. Shift-click or shift-drag a
+  lasso to pick several things, then **Show only these**. A focus is laid out
+  compactly on its own and never changes the full view's positions; exit it to
+  rearrange. Faceplates and focus are part of the view, so they save with it.
+- **Save view** stores positions, folded branches, layer visibility, faceplates
+  and focus separately from inventory data. Selecting a saved view and saving
+  updates it.
 - **Export viewer** downloads one self-contained HTML file with the current
   inventory and perspective, JS, CSS, and embedded Rust/WASM. Open it directly
   from disk, offline. Viewers can drag, expand/collapse, pan/zoom, toggle layers,

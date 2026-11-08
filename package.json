@@ -9,7 +9,8 @@
     "test:browser": "node scripts/browser-test.mjs",
     "test:grain": "node scripts/grain-test.mjs",
     "export:sample": "node scripts/export-sample.mjs",
-    "test:mobile": "node scripts/mobile-test.mjs"
+    "test:mobile": "node scripts/mobile-test.mjs",
+    "test:physical": "node scripts/physical-test.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.51.0",

@@ -647,3 +647,239 @@ dialog label {
     display: none;
   }
 }
+/* Faceplates: a thing's physical ports, drawn in place of its card. */
+.node.faceplate .slot rect {
+  fill: #f4f7f2;
+  stroke: #d3ddd1;
+}
+.node.faceplate .slot.used rect {
+  fill: #eaf2e4;
+  stroke: #9fbe95;
+}
+.node.faceplate .slot.empty rect {
+  fill: none;
+  stroke: #e1e7df;
+  stroke-dasharray: 3 3;
+}
+.node.faceplate .slot.unassigned rect {
+  fill: #fff7e8;
+  stroke: #e8c98d;
+  stroke-dasharray: 4 2;
+}
+.node.faceplate .slot-pos {
+  font-size: 10px;
+  font-weight: 700;
+  fill: #6d806f;
+}
+.node.faceplate .slot-label {
+  font-size: 10.5px;
+  fill: #2f4a3d;
+}
+.node.faceplate .slot-label.tiny,
+.node.faceplate .slot .tiny {
+  font-size: 8px;
+}
+.node.faceplate .slot.empty .slot-pos {
+  fill: #b3bfb2;
+}
+.node.picked rect.card,
+.node.picked rect.space-body {
+  stroke: #d08a2c;
+  stroke-width: 2.5;
+}
+.lasso {
+  fill: rgba(208, 138, 44, 0.08);
+  stroke: #d08a2c;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+/* Floating bars over the canvas: the active focus, and the picked things. */
+.float-bar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  background: #fff;
+  border: 1px solid #d6dfd5;
+  border-radius: 10px;
+  padding: 6px 8px 6px 12px;
+  box-shadow: 0 4px 14px rgba(38, 61, 52, 0.12);
+  font-size: 12px;
+  z-index: 2;
+}
+.float-bar.pick {
+  top: auto;
+  bottom: 58px;
+}
+.float-bar button {
+  padding: 5px 9px;
+}
+.float-bar .primary,
+.focus-actions .primary {
+  background: #2f6b4d;
+  color: #fff;
+  border-color: #2f6b4d;
+}
+.seg {
+  display: inline-flex;
+}
+.seg button {
+  border-radius: 0;
+  margin-left: -1px;
+}
+.seg button:first-child {
+  border-radius: 7px 0 0 7px;
+}
+.seg button:last-child {
+  border-radius: 0 7px 7px 0;
+}
+.seg button.on {
+  background: #e2eee0;
+  color: #224a36;
+  font-weight: 650;
+}
+/* Inspector: trace actions, schedule, connections, port editor. */
+.focus-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0;
+}
+.focus-actions button {
+  padding: 5px 8px;
+  font-size: 12px;
+}
+label.toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 8px 0;
+}
+.schedule,
+.conn-list {
+  margin: 12px 0;
+}
+.schedule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.schedule-head button {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.schedule h3,
+.conn-list h3 {
+  font-size: 12px;
+  margin: 0 0 6px;
+}
+.schedule table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+.schedule th {
+  text-align: left;
+  color: #82917f;
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+.schedule td {
+  border-top: 1px solid #e6ebe4;
+  padding: 4px 4px 4px 0;
+  vertical-align: top;
+}
+.schedule td small,
+.conn small {
+  display: block;
+  color: #82917f;
+  font-size: 10.5px;
+}
+.schedule tr.unassigned td {
+  background: #fff9ee;
+}
+.swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 5px;
+}
+.conn {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  align-items: start;
+  gap: 4px;
+  padding: 5px 0;
+  border-top: 1px solid #e6ebe4;
+  font-size: 12px;
+}
+.conn .swatch {
+  margin-top: 4px;
+}
+.conn select {
+  max-width: 92px;
+  font-size: 11px;
+  padding: 2px;
+}
+.conn small {
+  display: inline;
+}
+.port-editor {
+  margin: 12px 0;
+  border: 1px solid #e0e7de;
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+.port-editor summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.port-rows {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 11px;
+}
+.port-rows th {
+  text-align: left;
+  color: #82917f;
+  font-weight: 600;
+}
+.port-rows input,
+.port-rows select {
+  width: 100%;
+  font-size: 11px;
+  padding: 2px 3px;
+  border: 1px solid #d6dfd5;
+  border-radius: 4px;
+}
+.port-rows td:nth-child(1) {
+  width: 52px;
+}
+.port-rows td:nth-child(2) {
+  width: 42px;
+}
+.port-rows td:nth-child(3),
+.port-rows td:nth-child(4) {
+  width: 36px;
+}
+.port-rows td:last-child {
+  width: 22px;
+}
+.port-rows .remove-port {
+  padding: 1px 4px;
+  border: 0;
+  background: none;
+  color: #a34b3b;
+}
+.float-bar[hidden] {
+  display: none;
+}
