@@ -305,11 +305,58 @@ fn measure(
     extent
 }
 
-pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
-    validate(&req.document)?;
-    validate_view(&req.view)?;
-    let doc = &req.document;
-    let view = &req.view;
+type BundleKey = (String, Vec<(String, Role)>);
+/// Visible connections grouped into bundles: one per layer and set of
+/// visible endpoints (an endpoint inside a collapsed space projects onto it).
+fn bundle_groups(doc: &Document, view: &View) -> BTreeMap<BundleKey, Vec<String>> {
+    let visible_ancestor = |id: &str| -> String {
+        let mut result = id.to_string();
+        let mut current = doc
+            .entities
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.parent.as_deref());
+        while let Some(p) = current {
+            if view.collapsed.contains(p) {
+                result = p.into();
+            }
+            current = doc
+                .entities
+                .iter()
+                .find(|e| e.id == p)
+                .and_then(|e| e.parent.as_deref());
+        }
+        result
+    };
+    let mut groups: BTreeMap<BundleKey, Vec<String>> = BTreeMap::new();
+    for c in &doc.connections {
+        if view.hidden_layers.contains(&c.layer) {
+            continue;
+        }
+        let mut eps: Vec<_> = c
+            .endpoints
+            .iter()
+            .map(|ep| (visible_ancestor(&ep.entity), ep.role.clone()))
+            .collect();
+        eps.sort();
+        eps.dedup();
+        if eps.iter().map(|(id, _)| id).collect::<BTreeSet<_>>().len() < 2 {
+            continue;
+        }
+        groups
+            .entry((c.layer.clone(), eps))
+            .or_default()
+            .push(c.id.clone());
+    }
+    groups
+}
+/// Box geometry without any routing: parent-relative positions, each
+/// container's expanded size, and the visible nodes in world coordinates.
+struct Placement {
+    positions: BTreeMap<String, Point>,
+    nodes: Vec<Node>,
+}
+fn place(doc: &Document, view: &View) -> Placement {
     // Old flat-card coordinates cannot describe containment. Rebuild their
     // geometry once; keep the view's fold/layer choices and the inventory.
     let mut positions = if view.layout_version >= 2 {
@@ -392,46 +439,17 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
             &mut nodes,
         );
     }
-    let visible_ancestor = |id: &str| -> String {
-        let mut result = id.to_string();
-        let mut current = doc
-            .entities
-            .iter()
-            .find(|e| e.id == id)
-            .and_then(|e| e.parent.as_deref());
-        while let Some(p) = current {
-            if view.collapsed.contains(p) {
-                result = p.into();
-            }
-            current = doc
-                .entities
-                .iter()
-                .find(|e| e.id == p)
-                .and_then(|e| e.parent.as_deref());
-        }
-        result
-    };
-    type Key = (String, Vec<(String, Role)>);
-    let mut groups: BTreeMap<Key, Vec<String>> = BTreeMap::new();
-    for c in &doc.connections {
-        if view.hidden_layers.contains(&c.layer) {
-            continue;
-        }
-        let mut eps: Vec<_> = c
-            .endpoints
-            .iter()
-            .map(|ep| (visible_ancestor(&ep.entity), ep.role.clone()))
-            .collect();
-        eps.sort();
-        eps.dedup();
-        if eps.iter().map(|(id, _)| id).collect::<BTreeSet<_>>().len() < 2 {
-            continue;
-        }
-        groups
-            .entry((c.layer.clone(), eps))
-            .or_default()
-            .push(c.id.clone());
-    }
+    Placement { positions, nodes }
+}
+pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
+    validate(&req.document)?;
+    validate_view(&req.view)?;
+    let doc = &req.document;
+    let view = &req.view;
+    let Placement {
+        positions, nodes, ..
+    } = place(doc, view);
+    let groups = bundle_groups(doc, view);
     let mut attachment_hints = view.attachment_hints.clone();
     let mut reserved = Vec::new();
     let mut bundles = Vec::new();
@@ -2024,9 +2042,26 @@ pub struct MoveRequest {
     pub view: View,
     pub entity: String,
     pub position: Point,
+    /// An intermediate drag frame rather than the drop.
+    #[serde(default)]
+    pub dragging: bool,
+}
+/// Covering this share of the smaller box (or its centre) swaps two siblings.
+const SWAP_SHARE: f64 = 1. / 3.;
+fn overlap_area(a: Rect, b: Rect) -> f64 {
+    let w = (a.position.x + a.width).min(b.position.x + b.width) - a.position.x.max(b.position.x);
+    let h = (a.position.y + a.height).min(b.position.y + b.height) - a.position.y.max(b.position.y);
+    w.max(0.) * h.max(0.)
 }
 /// Move in world coordinates while retaining parent-relative offsets. Dragging
 /// a space moves its hidden and visible descendants without rewriting them.
+///
+/// Siblings make room instead of overlapping. If the dragged box's centre is
+/// over a sibling, the two swap: the sibling takes the slot the dragged box
+/// left. Any remaining overlap pushes siblings aside (cascading), and a
+/// container that grows pushes its own siblings in turn, up to the roots.
+/// Everything is computed from `view` as given, so a drag that sends its
+/// starting view every frame lets pushed boxes spring back as it moves on.
 pub fn move_entity(req: &MoveRequest) -> Result<View, String> {
     if !req.position.x.is_finite()
         || !req.position.y.is_finite()
@@ -2035,66 +2070,267 @@ pub fn move_entity(req: &MoveRequest) -> Result<View, String> {
     {
         return Err("Invalid coordinates".into());
     }
-    let layout = layout(&LayoutRequest {
-        document: req.document.clone(),
-        view: req.view.clone(),
-    })?;
-    layout
+    validate(&req.document)?;
+    validate_view(&req.view)?;
+    let doc = &req.document;
+    let base = place(doc, &req.view);
+    let visible: BTreeMap<&str, &Node> = base.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    visible
+        .get(req.entity.as_str())
+        .ok_or("Move a visible entity")?;
+    let parent_of = |id: &str| {
+        doc.entities
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.parent.clone())
+    };
+    let mut target = req.position;
+    if let Some(parent) = parent_of(&req.entity) {
+        let parent = visible.get(parent.as_str()).ok_or("Parent is hidden")?;
+        target.x -= parent.position.x;
+        target.y -= parent.position.y;
+    }
+    // Visible footprint: a collapsed space occupies a card, not its contents.
+    let mut sizes: BTreeMap<String, Size> = base
         .nodes
         .iter()
-        .find(|n| n.id == req.entity)
-        .ok_or("Move a visible entity")?;
-    let e = req
-        .document
-        .entities
-        .iter()
-        .find(|e| e.id == req.entity)
-        .unwrap();
-    let mut p = req.position;
-    if let Some(parent) = &e.parent {
-        let parent = layout
-            .nodes
+        .map(|n| {
+            (
+                n.id.clone(),
+                Size {
+                    width: n.width,
+                    height: n.height,
+                },
+            )
+        })
+        .collect();
+    let mut positions = base.positions.clone();
+    let mut moved = req.entity.clone();
+    let mut home = Some(base.positions[&req.entity]);
+    loop {
+        let parent = parent_of(&moved);
+        let siblings: Vec<String> = doc
+            .entities
             .iter()
-            .find(|n| &n.id == parent)
-            .ok_or("Parent is hidden")?;
-        p.x -= parent.position.x;
-        p.y -= parent.position.y;
+            .filter(|e| e.parent == parent && visible.contains_key(e.id.as_str()))
+            .map(|e| e.id.clone())
+            .collect();
+        positions.insert(moved.clone(), target);
+        let mut fixed = vec![moved.clone()];
+        if let Some(home) = home.take() {
+            let size = sizes[&moved];
+            let dragged = Rect {
+                position: target,
+                width: size.width,
+                height: size.height,
+            };
+            let centre = Point {
+                x: target.x + size.width / 2.,
+                y: target.y + size.height / 2.,
+            };
+            // How much of the smaller box the drag covers, per sibling (at
+            // its starting position, so a held box cannot slide away).
+            let mut covered: Vec<(f64, &String)> = siblings
+                .iter()
+                .filter(|id| **id != moved)
+                .filter_map(|id| {
+                    let r = Rect {
+                        position: base.positions[id],
+                        width: sizes[id].width,
+                        height: sizes[id].height,
+                    };
+                    let area = overlap_area(dragged, r);
+                    (area > 0.).then(|| {
+                        let smaller = (r.width * r.height).min(size.width * size.height);
+                        let share = if r.contains(centre, 0.) {
+                            1.
+                        } else {
+                            area / smaller
+                        };
+                        (share, id)
+                    })
+                })
+                .collect();
+            covered.sort_by(|a, b| b.0.total_cmp(&a.0));
+            if let Some((share, other)) = covered.first() {
+                if *share >= SWAP_SHARE {
+                    positions.insert((*other).clone(), home);
+                    fixed.push((*other).clone());
+                    covered.remove(0);
+                }
+            }
+            // Mid-drag, a box being moved onto stays put until the swap
+            // threshold; dropping short of it pushes the box aside instead.
+            if req.dragging {
+                fixed.extend(covered.into_iter().map(|(_, id)| id.clone()));
+            }
+        }
+        separate(&siblings, &fixed, &mut positions, &sizes);
+        let Some(parent) = parent else { break };
+        // Grow toward the top/left by moving the container origin and
+        // compensating its children, so their world positions hold.
+        let dx = siblings
+            .iter()
+            .map(|id| PADDING - positions[id].x)
+            .fold(0., f64::max);
+        let dy = siblings
+            .iter()
+            .map(|id| CONTENT_Y - positions[id].y)
+            .fold(0., f64::max);
+        for id in &siblings {
+            let p = positions.get_mut(id).unwrap();
+            p.x += dx;
+            p.y += dy;
+        }
+        let origin = positions.get_mut(&parent).unwrap();
+        origin.x -= dx;
+        origin.y -= dy;
+        // The container's new extent, as `measure` will compute it.
+        let mut extent = Size {
+            width: 272.,
+            height: 148.,
+        };
+        for id in &siblings {
+            extent.width = extent
+                .width
+                .max(positions[id].x + sizes[id].width + PADDING);
+            extent.height = extent
+                .height
+                .max(positions[id].y + sizes[id].height + PADDING);
+        }
+        sizes.insert(parent.clone(), extent);
+        target = positions[&parent];
+        moved = parent;
     }
     let mut view = req.view.clone();
     view.layout_version = 2;
-    view.positions = layout.positions;
-    view.positions.insert(req.entity.clone(), p);
-    // Grow toward the top/left by moving the container origin and compensating
-    // all its children. Existing siblings keep their world positions.
-    let mut child = req.entity.clone();
-    while let Some(parent) = req
-        .document
-        .entities
-        .iter()
-        .find(|e| e.id == child)
-        .and_then(|e| e.parent.clone())
-    {
-        let local = view.positions[&child];
-        let dx = (PADDING - local.x).max(0.);
-        let dy = (CONTENT_Y - local.y).max(0.);
-        if dx > 0. || dy > 0. {
-            for sibling in req
-                .document
-                .entities
-                .iter()
-                .filter(|e| e.parent.as_ref() == Some(&parent))
-            {
-                let pos = view.positions.get_mut(&sibling.id).unwrap();
-                pos.x += dx;
-                pos.y += dy;
-            }
-            let origin = view.positions.get_mut(&parent).unwrap();
-            origin.x -= dx;
-            origin.y -= dy;
-        }
-        child = parent;
-    }
+    view.positions = positions;
     Ok(view)
+}
+/// Push apart overlapping boxes among `ids` (parent-relative positions),
+/// keeping at least `GAP` between them. `fixed` boxes never move; the rest
+/// yield to boxes nearer the first fixed one, along the axis that needs the
+/// smaller move, away from the box pushing them.
+fn separate(
+    ids: &[String],
+    fixed: &[String],
+    positions: &mut BTreeMap<String, Point>,
+    sizes: &BTreeMap<String, Size>,
+) {
+    let centre = |positions: &BTreeMap<String, Point>, id: &str| {
+        let (p, s) = (positions[id], sizes[id]);
+        Point {
+            x: p.x + s.width / 2.,
+            y: p.y + s.height / 2.,
+        }
+    };
+    let anchor = centre(positions, &fixed[0]);
+    let mut rest: Vec<&String> = ids.iter().filter(|id| !fixed.contains(id)).collect();
+    rest.sort_by(|a, b| {
+        distance(centre(positions, a), anchor).total_cmp(&distance(centre(positions, b), anchor))
+    });
+    let order: Vec<&String> = fixed.iter().chain(rest).collect();
+    for _ in 0..64 {
+        let mut changed = false;
+        for i in 0..order.len() {
+            for j in (i + 1).max(fixed.len())..order.len() {
+                let (a, b) = (order[i], order[j]);
+                let (pa, sa, pb, sb) = (positions[a], sizes[a], positions[b], sizes[b]);
+                let right = pa.x + sa.width + GAP - pb.x;
+                let left = pb.x + sb.width + GAP - pa.x;
+                let down = pa.y + sa.height + GAP - pb.y;
+                let up = pb.y + sb.height + GAP - pa.y;
+                if right.min(left) <= GEOMETRY_EPS || down.min(up) <= GEOMETRY_EPS {
+                    continue;
+                }
+                let (ca, cb) = (centre(positions, a), centre(positions, b));
+                let p = positions.get_mut(b).unwrap();
+                if right.min(left) <= down.min(up) {
+                    p.x += if cb.x >= ca.x { right } else { -left };
+                } else {
+                    p.y += if cb.y >= ca.y { down } else { -up };
+                }
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+/// A routing-free layout for interactive drags: box geometry is exact, and
+/// each bundle is drawn as plain elbows from its endpoints' facing sides to
+/// the endpoints' centroid. The full `layout` replaces it on drop.
+pub fn preview_layout(req: &LayoutRequest) -> Result<Layout, String> {
+    validate(&req.document)?;
+    validate_view(&req.view)?;
+    let Placement {
+        positions, nodes, ..
+    } = place(&req.document, &req.view);
+    let by_id: BTreeMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let centre = |n: &Node| Point {
+        x: n.position.x + n.width / 2.,
+        y: n.position.y + n.height / 2.,
+    };
+    let mut bundles = Vec::new();
+    for ((layer, eps), connections) in bundle_groups(&req.document, &req.view) {
+        let ends: Vec<_> = eps
+            .iter()
+            .filter_map(|(id, role)| by_id.get(id.as_str()).map(|n| (*n, role)))
+            .collect();
+        if ends.len() < 2 {
+            continue;
+        }
+        let hub = Point {
+            x: ends.iter().map(|(n, _)| centre(n).x).sum::<f64>() / ends.len() as f64,
+            y: ends.iter().map(|(n, _)| centre(n).y).sum::<f64>() / ends.len() as f64,
+        };
+        let branches = ends
+            .iter()
+            .map(|(n, role)| {
+                let c = centre(n);
+                let side = if hub.x >= c.x {
+                    n.position.x + n.width
+                } else {
+                    n.position.x
+                };
+                Branch {
+                    entity: n.id.clone(),
+                    role: (*role).clone(),
+                    points: simplify(vec![
+                        Point { x: side, y: c.y },
+                        Point { x: hub.x, y: c.y },
+                        hub,
+                    ]),
+                }
+            })
+            .collect();
+        bundles.push(Bundle {
+            layer,
+            connections,
+            branches,
+            junctions: if ends.len() > 2 {
+                vec![hub]
+            } else {
+                Vec::new()
+            },
+            label_position: Some(hub),
+        });
+    }
+    Ok(Layout {
+        attachment_hints: req.view.attachment_hints.clone(),
+        layout_version: 2,
+        unrouted_connections: Vec::new(),
+        nodes,
+        bundles,
+        positions,
+    })
+}
+#[wasm_bindgen]
+pub fn preview(input: &str) -> Result<String, JsError> {
+    let request: LayoutRequest = serde_json::from_str(input)?;
+    let result = preview_layout(&request).map_err(|e| JsError::new(&e))?;
+    Ok(serde_json::to_string(&result)?)
 }
 #[wasm_bindgen]
 pub fn move_node(input: &str) -> Result<String, JsError> {
@@ -3300,6 +3536,7 @@ mod tests {
         let lamp = first.nodes.iter().find(|n| n.id == "lamp").unwrap();
         for delta in [1., 2., 1., 0., -1., 0.] {
             view = move_entity(&MoveRequest {
+                dragging: false,
                 document: doc.clone(),
                 view,
                 entity: "lamp".into(),
@@ -3322,9 +3559,18 @@ mod tests {
             }
             view.attachment_hints = next.attachment_hints;
         }
-        view = move_entity(&MoveRequest {
+        // One drag out and back: every frame starts from the drag's first
+        // view, so the rooms the far position pushed return with it.
+        let start = view.clone();
+        let before = layout(&LayoutRequest {
             document: doc.clone(),
-            view,
+            view: start.clone(),
+        })
+        .unwrap();
+        view = move_entity(&MoveRequest {
+            dragging: true,
+            document: doc.clone(),
+            view: start.clone(),
             entity: "lamp".into(),
             position: Point {
                 x: lamp.position.x + 500.,
@@ -3338,8 +3584,9 @@ mod tests {
         })
         .unwrap();
         view = move_entity(&MoveRequest {
+            dragging: false,
             document: doc.clone(),
-            view,
+            view: start,
             entity: "lamp".into(),
             position: lamp.position,
         })
@@ -3350,7 +3597,7 @@ mod tests {
         })
         .unwrap();
         for id in ["kitchen", "ground", "house"] {
-            if let Some(original) = first.nodes.iter().find(|n| n.id == id) {
+            if let Some(original) = before.nodes.iter().find(|n| n.id == id) {
                 let large = grown.nodes.iter().find(|n| n.id == id).unwrap();
                 let small = restored.nodes.iter().find(|n| n.id == id).unwrap();
                 assert!(large.width > original.width || large.height > original.height);
@@ -3358,6 +3605,136 @@ mod tests {
                     (small.width, small.height),
                     (original.width, original.height)
                 );
+            }
+        }
+    }
+    /// Visible siblings keep at least `GAP` between them at every level.
+    fn assert_separated(doc: &Document, result: &Layout) {
+        for a in &result.nodes {
+            for b in &result.nodes {
+                let parent = |id: &str| {
+                    doc.entities
+                        .iter()
+                        .find(|e| e.id == id)
+                        .unwrap()
+                        .parent
+                        .clone()
+                };
+                if a.id >= b.id || parent(&a.id) != parent(&b.id) {
+                    continue;
+                }
+                let apart = a.position.x + a.width + GAP <= b.position.x + 1e-6
+                    || b.position.x + b.width + GAP <= a.position.x + 1e-6
+                    || a.position.y + a.height + GAP <= b.position.y + 1e-6
+                    || b.position.y + b.height + GAP <= a.position.y + 1e-6;
+                assert!(apart, "{} and {} are closer than GAP", a.id, b.id);
+            }
+        }
+    }
+    fn settled(doc: &Document) -> (View, Layout) {
+        let first = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: View::default(),
+        })
+        .unwrap();
+        let view = View {
+            layout_version: 2,
+            positions: first.positions.clone(),
+            ..View::default()
+        };
+        (view, first)
+    }
+    fn node<'a>(l: &'a Layout, id: &str) -> &'a Node {
+        l.nodes.iter().find(|n| n.id == id).unwrap()
+    }
+    fn drag(doc: &Document, view: &View, id: &str, to: Point, dragging: bool) -> Layout {
+        let view = move_entity(&MoveRequest {
+            dragging,
+            document: doc.clone(),
+            view: view.clone(),
+            entity: id.into(),
+            position: to,
+        })
+        .unwrap();
+        preview_layout(&LayoutRequest {
+            document: doc.clone(),
+            view,
+        })
+        .unwrap()
+    }
+    #[test]
+    fn dragging_onto_a_sibling_swaps_their_places() {
+        let doc = sample();
+        let (view, first) = settled(&doc);
+        let (lamp, sensor) = (node(&first, "lamp"), node(&first, "sensor"));
+        let to = Point {
+            x: sensor.position.x + 10.,
+            y: sensor.position.y + 10.,
+        };
+        for dragging in [true, false] {
+            let after = drag(&doc, &view, "lamp", to, dragging);
+            assert_eq!(node(&after, "lamp").position, to);
+            assert_eq!(node(&after, "sensor").position, lamp.position);
+            assert_separated(&doc, &after);
+        }
+    }
+    #[test]
+    fn a_box_moved_onto_holds_mid_drag_and_yields_on_drop() {
+        let doc = sample();
+        let (view, first) = settled(&doc);
+        let sensor = node(&first, "sensor");
+        // Cover a sliver of the sensor: below the swap threshold.
+        let to = Point {
+            x: sensor.position.x,
+            y: sensor.position.y - CARD_HEIGHT + 12.,
+        };
+        let held = drag(&doc, &view, "lamp", to, true);
+        assert_eq!(node(&held, "sensor").position, sensor.position);
+        let dropped = drag(&doc, &view, "lamp", to, false);
+        assert_eq!(node(&dropped, "lamp").position, to);
+        assert_ne!(node(&dropped, "sensor").position, sensor.position);
+        assert_separated(&doc, &dropped);
+    }
+    #[test]
+    fn pushes_cascade_and_spring_back_within_a_drag() {
+        let doc = sample();
+        let (view, first) = settled(&doc);
+        let kitchen = node(&first, "kitchen");
+        // Drop the lamp below the kitchen's contents: the kitchen grows into
+        // its neighbours, which make room, and so on up the hierarchy.
+        let far = Point {
+            x: kitchen.position.x + 40.,
+            y: kitchen.position.y + kitchen.height + 300.,
+        };
+        let pushed = drag(&doc, &view, "lamp", far, true);
+        assert_separated(&doc, &pushed);
+        assert!(node(&pushed, "kitchen").height > kitchen.height);
+        let back = drag(&doc, &view, "lamp", node(&first, "lamp").position, true);
+        for n in &first.nodes {
+            assert_eq!(node(&back, &n.id).position, n.position, "{}", n.id);
+            assert_eq!(
+                (node(&back, &n.id).width, node(&back, &n.id).height),
+                (n.width, n.height)
+            );
+        }
+    }
+    #[test]
+    fn preview_draws_every_bundle_without_routing() {
+        let doc = sample();
+        let (view, first) = settled(&doc);
+        let preview = preview_layout(&LayoutRequest {
+            document: doc,
+            view,
+        })
+        .unwrap();
+        assert_eq!(preview.bundles.len(), first.bundles.len());
+        assert!(preview.unrouted_connections.is_empty());
+        for b in &preview.bundles {
+            for branch in &b.branches {
+                assert!(branch.points.len() >= 2);
+                for w in branch.points.windows(2) {
+                    assert!(w[0].x == w[1].x || w[0].y == w[1].y);
+                }
             }
         }
     }
@@ -3376,6 +3753,7 @@ mod tests {
         };
         let kitchen = first.nodes.iter().find(|n| n.id == "kitchen").unwrap();
         let moved = move_entity(&MoveRequest {
+            dragging: false,
             document: doc.clone(),
             view: view.clone(),
             entity: "kitchen".into(),
@@ -3390,23 +3768,23 @@ mod tests {
             view: moved.clone(),
         })
         .unwrap();
-        for node in &first.nodes {
-            let after = result.nodes.iter().find(|n| n.id == node.id).unwrap();
-            let delta = if ["kitchen", "lamp", "sensor", "tap"].contains(&node.id.as_str()) {
-                20.
-            } else {
-                0.
-            };
+        // The kitchen's subtree moves rigidly; its rooms' neighbours only ever
+        // move to keep their distance, never into it.
+        for id in ["kitchen", "lamp", "sensor", "tap"] {
+            let before = first.nodes.iter().find(|n| n.id == id).unwrap();
+            let after = result.nodes.iter().find(|n| n.id == id).unwrap();
             assert_eq!(
                 after.position,
                 Point {
-                    x: node.position.x + delta,
-                    y: node.position.y + delta
+                    x: before.position.x + 20.,
+                    y: before.position.y + 20.
                 }
             );
         }
+        assert_separated(&doc, &result);
         assert_eq!(moved.positions["lamp"], view.positions["lamp"]);
         let clamped = move_entity(&MoveRequest {
+            dragging: false,
             document: doc.clone(),
             view: moved,
             entity: "lamp".into(),

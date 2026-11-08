@@ -1,4 +1,4 @@
-import init, { compute, move_node } from "./pkg/stufftracker_core";
+import init, { compute, move_node, preview } from "./pkg/stufftracker_core";
 declare const WASM_BASE64: string;
 declare const WORKER_SOURCE: string;
 type Point = { x: number; y: number };
@@ -104,6 +104,8 @@ function applyLayout(layout: Layout) {
   view.layout_version = current.layout_version;
 }
 function render() {
+  layoutGeneration++;
+  delete svg.dataset.layoutPending;
   computeLayout();
   renderScene();
   renderTree();
@@ -328,69 +330,70 @@ function zoom(mult: number, x?: number, y?: number) {
   applyCamera();
 }
 let drag: { id: string | null; start: Point; origin: Point } | null = null;
-// Pointer events arrive far faster than a move + relayout completes on a
-// real inventory. Only the latest target position matters: `latestMove` is
-// overwritten on every pointermove and `moveSeq` counts them, while
-// `appliedSeq` is the newest move the view reflects. Layout runs in a worker
-// when one is available (one request in flight, always for the newest
-// position) so the page keeps panning and painting; otherwise it runs on this
-// thread at most once per animation frame.
+// A drag is computed from the view it started with: every frame moves the
+// dragged box from there (so boxes it pushed or swapped spring back as it moves
+// on) and draws a routing-free preview, cheap enough for every animation
+// frame. On drop the final move lands and one full routing pass runs, in a
+// worker when one is available so the page stays responsive.
+let dragBase: View | null = null;
 let latestMove: { id: string; position: Point } | null = null;
-let moveSeq = 0,
-  appliedSeq = 0,
-  moveFrame = 0;
+let moveFrame = 0;
 let layoutWorker: Worker | null = null,
-  workerBusy = false,
-  // Bumped whenever this thread applies a move itself; any worker reply
-  // computed against an older view is then discarded.
-  workerGeneration = 0;
-// `data-layout-pending` marks the gap between a drag position and the layout
-// that reflects it, so automation can wait for the settled scene.
-function markSettled() {
-  if (appliedSeq === moveSeq) delete svg.dataset.layoutPending;
-}
-function requestMove(move: { id: string; position: Point }) {
-  latestMove = move;
-  moveSeq++;
-  svg.dataset.layoutPending = "";
-  if (layoutWorker) {
-    if (!workerBusy) postMove();
-  } else if (!moveFrame) moveFrame = requestAnimationFrame(settleDrag);
-}
-function postMove() {
-  if (!layoutWorker || !latestMove || appliedSeq === moveSeq) return;
-  workerBusy = true;
-  layoutWorker.postMessage({
-    generation: workerGeneration,
-    seq: moveSeq,
-    document: JSON.stringify(doc),
-    view: JSON.stringify(view),
-    entity: latestMove.id,
-    position: latestMove.position,
-  });
-}
-// Bring the view up to the newest move synchronously. Runs per frame without
-// a worker, and with one whenever something else is about to touch the view
-// before the worker has delivered the final position.
-function settleDrag() {
-  if (moveFrame) cancelAnimationFrame(moveFrame);
-  moveFrame = 0;
-  if (!latestMove || appliedSeq === moveSeq) return;
-  workerGeneration++;
+  // Bumped whenever the view changes after a full layout was requested; a
+  // worker reply for an older view is then discarded.
+  layoutGeneration = 0;
+function moveFrom(base: View, dragging: boolean) {
   view = JSON.parse(
     move_node(
       JSON.stringify({
         document: doc,
-        view,
-        entity: latestMove.id,
-        position: latestMove.position,
+        view: base,
+        entity: latestMove!.id,
+        position: latestMove!.position,
+        dragging,
       }),
     ),
   );
-  appliedSeq = moveSeq;
-  markSettled();
-  computeLayout();
+  applyLayout(JSON.parse(preview(JSON.stringify({ document: doc, view }))));
   renderScene();
+}
+function beginDrag() {
+  finishDrag();
+  dragBase = structuredClone(view);
+  layoutGeneration++;
+}
+function requestMove(move: { id: string; position: Point }) {
+  latestMove = move;
+  if (!moveFrame)
+    moveFrame = requestAnimationFrame(() => {
+      moveFrame = 0;
+      if (dragBase && latestMove) moveFrom(dragBase, true);
+    });
+}
+function finishDrag() {
+  if (moveFrame) cancelAnimationFrame(moveFrame);
+  moveFrame = 0;
+  const base = dragBase;
+  dragBase = null;
+  if (!base || !latestMove) return;
+  moveFrom(base, false);
+  latestMove = null;
+  routeInBackground();
+}
+// `data-layout-pending` marks a drawn preview awaiting its routed layout, so
+// automation can wait for the settled scene.
+function routeInBackground() {
+  const generation = ++layoutGeneration;
+  if (!layoutWorker) {
+    computeLayout();
+    renderScene();
+    return;
+  }
+  svg.dataset.layoutPending = "";
+  layoutWorker.postMessage({
+    generation,
+    input: JSON.stringify({ document: doc, view }),
+  });
 }
 function startLayoutWorker(module: WebAssembly.Module) {
   let worker: Worker;
@@ -402,38 +405,31 @@ function startLayoutWorker(module: WebAssembly.Module) {
     URL.revokeObjectURL(url);
     worker.postMessage({ module });
   } catch {
-    return; // e.g. a sandboxed export; stay on the per-frame path
+    return; // e.g. a sandboxed export; route on this thread instead
   }
   const fallBack = () => {
     worker.terminate();
     layoutWorker = null;
-    workerBusy = false;
-    settleDrag();
+    if ("layoutPending" in svg.dataset) {
+      delete svg.dataset.layoutPending;
+      routeInBackground();
+    }
   };
   worker.onerror = fallBack;
   worker.onmessage = (ev) => {
-    workerBusy = false;
     const r = ev.data;
     if (r.error) {
-      status(`Layout worker failed, laying out in page: ${r.error}`, true);
+      status(`Layout worker failed, routing in page: ${r.error}`, true);
       fallBack();
       return;
     }
-    if (r.generation === workerGeneration && r.seq > appliedSeq) {
-      view = JSON.parse(r.view);
-      appliedSeq = r.seq;
-      markSettled();
-      applyLayout(JSON.parse(r.layout));
-      renderScene();
-    }
-    postMove();
+    if (r.generation !== layoutGeneration) return;
+    delete svg.dataset.layoutPending;
+    applyLayout(JSON.parse(r.layout));
+    renderScene();
   };
   layoutWorker = worker;
 }
-// Any new interaction first lands an in-flight drag, so handlers always see
-// (and build on) the view the user last saw the node dropped into.
-document.addEventListener("pointerdown", () => settleDrag(), true);
-document.addEventListener("keydown", () => settleDrag(), true);
 const pointers = new Map<number, Point>();
 let pinch: { distance: number; scale: number; world: Point } | null = null;
 function pointerPoint(ev: PointerEvent): Point {
@@ -449,6 +445,7 @@ function pinchGeometry() {
 }
 function startPinch() {
   const { center, distance } = pinchGeometry();
+  finishDrag();
   drag = null;
   pinch = {
     distance,
@@ -461,8 +458,8 @@ function startPinch() {
 }
 function endPointer(ev: PointerEvent) {
   if (!pointers.delete(ev.pointerId)) return;
-  // Land the drag where the pointer let go (the worker delivers it itself).
-  if (!layoutWorker) settleDrag();
+  // Land the drag where the pointer let go.
+  finishDrag();
   if (pinch) {
     if (pointers.size >= 2) startPinch();
     else {
@@ -504,6 +501,7 @@ svg.addEventListener("pointerdown", (ev) => {
     if (node.container && !node.collapsed && !target.closest(".space-header"))
       id = null;
   }
+  if (id) beginDrag();
   drag = {
     id,
     start: { x: ev.clientX - r.left, y: ev.clientY - r.top },

@@ -99,7 +99,12 @@ entities. Rust computes nested container sizes and absolute frames. Dragging bey
 parent grows its bounds, recursively expanding ancestors; bounds shrink again
 to the current contents when that space is no longer needed. Dragging left or up
 moves container origins while preserving sibling world positions. Moving a space translates all descendants
-without rewriting their offsets. Collapse retains expanded sibling slots so
+without rewriting their offsets. Siblings never overlap: dragging a box onto
+another (covering a third of the smaller one, or its centre) swaps them, and
+any remaining overlap pushes siblings aside, cascading through containers that
+grow. Each drag frame is computed from the view the drag started with, so
+pushed boxes spring back as the drag moves on, and is drawn with plain elbows
+instead of routes; the full routing pass runs once on drop, in a Web Worker. Collapse retains expanded sibling slots so
 neighbors stay fixed. Routing follows the hierarchy one level at a time: each space treats its immediate
 child boxes as solid obstacles. A connection crosses each ancestor through a shared
 boundary gateway, then continues through the containing space. Unrelated rooms

@@ -58,6 +58,19 @@ try {
         }),
       ),
     );
+  // Siblings never overlap: drags push or swap them instead.
+  const apart = (g) => {
+    for (const [a, p] of Object.entries(g))
+      for (const [b, q] of Object.entries(g))
+        if (a < b && p.parent === q.parent)
+          assert(
+            p.x + p.width <= q.x ||
+              q.x + q.width <= p.x ||
+              p.y + p.height <= q.y ||
+              q.y + q.height <= p.y,
+            `${a} overlaps ${b}`,
+          );
+  };
   const nested = await geometry();
   assert.equal(await page.locator(".space").count(), 7);
   for (const n of Object.values(nested))
@@ -94,11 +107,13 @@ try {
   const dx = grouped.kitchen.x - nested.kitchen.x,
     dy = grouped.kitchen.y - nested.kitchen.y;
   assert(dx > 0 && dy > 0);
-  for (const id of Object.keys(nested)) {
-    const member = ["kitchen", "lamp", "sensor", "tap"].includes(id);
-    assert(Math.abs(grouped[id].x - nested[id].x - (member ? dx : 0)) < 0.001);
-    assert(Math.abs(grouped[id].y - nested[id].y - (member ? dy : 0)) < 0.001);
+  // The kitchen's subtree moves rigidly; neighbours may be pushed aside, but
+  // siblings never overlap.
+  for (const id of ["kitchen", "lamp", "sensor", "tap"]) {
+    assert(Math.abs(grouped[id].x - nested[id].x - dx) < 0.001);
+    assert(Math.abs(grouped[id].y - nested[id].y - dy) < 0.001);
   }
+  apart(grouped);
   const before = await transforms();
   await page.locator('.tree-row [data-fold="kitchen"]').click();
   assert.equal(await page.locator('.node[data-id="lamp"]').count(), 0);
@@ -121,10 +136,25 @@ try {
   await page.mouse.move(box.x + 65, box.y + 45, { steps: 4 });
   await page.mouse.up();
   await settled(page);
-  const moved = await transforms();
+  let moved = await transforms();
   assert.notEqual(moved.lamp, before.lamp);
-  for (const id of Object.keys(before))
-    if (id !== "lamp") assert.equal(moved[id], before[id]);
+  apart(await geometry());
+  // Dragging one box onto another swaps them.
+  {
+    const g = await geometry();
+    const sensor = await page.locator('.node[data-id="sensor"]').boundingBox();
+    const lamp = await page.locator('.node[data-id="lamp"]').boundingBox();
+    await page.mouse.move(sensor.x + 30, sensor.y + 20);
+    await page.mouse.down();
+    await page.mouse.move(lamp.x + 30, lamp.y + 30, { steps: 6 });
+    await page.mouse.up();
+    await settled(page);
+    const swapped = await geometry();
+    assert.equal(swapped.lamp.x, g.sensor.x);
+    assert.equal(swapped.lamp.y, g.sensor.y);
+    apart(swapped);
+    moved = await transforms();
+  }
   await page.getByRole("button", { name: "Save view", exact: true }).click();
   await page.locator("#view-name").fill("Browser test perspective");
   await page.locator("#view-form button.primary").click();
