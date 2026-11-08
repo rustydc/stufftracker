@@ -179,6 +179,11 @@ pub struct Focus {
     pub hops: Option<u32>,
     #[serde(default)]
     pub direction: Direction,
+    /// The focus's own arrangement, parent-relative like `View::positions`:
+    /// it starts compact and keeps whatever is dragged in it. The full
+    /// view's positions are never changed from a focus.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub positions: BTreeMap<String, Point>,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -275,6 +280,11 @@ pub struct Layout {
     pub nodes: Vec<Node>,
     pub bundles: Vec<Bundle>,
     pub positions: BTreeMap<String, Point>,
+    /// For a focused view: the focus's arrangement after layout (new things
+    /// placed), to store back as `view.focus.positions`. `positions` stays
+    /// the full view's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus_positions: Option<BTreeMap<String, Point>>,
 }
 
 pub fn validate(doc: &Document) -> Result<(), String> {
@@ -445,6 +455,7 @@ pub fn validate_view(view: &View) -> Result<(), String> {
         .positions
         .values()
         .chain(view.attachment_hints.values())
+        .chain(view.focus.iter().flat_map(|f| f.positions.values()))
         .any(|p| !p.x.is_finite() || !p.y.is_finite() || p.x.abs() > 1e6 || p.y.abs() > 1e6)
     {
         return Err("Invalid coordinates".into());
@@ -1032,7 +1043,7 @@ fn focus_projection(doc: &Document, view: &View) -> Option<(Document, View)> {
         projected,
         View {
             layout_version: 2,
-            positions: BTreeMap::new(),
+            positions: focus.positions.clone(),
             collapsed,
             hidden_layers: view.hidden_layers.clone(),
             attachment_hints: BTreeMap::new(),
@@ -1047,7 +1058,10 @@ fn focused(
 ) -> Option<Result<Layout, String>> {
     let (document, view) = focus_projection(&req.document, &req.view)?;
     Some(lay(&LayoutRequest { document, view }).map(|mut l| {
-        l.positions = req.view.positions.clone();
+        l.focus_positions = Some(std::mem::replace(
+            &mut l.positions,
+            req.view.positions.clone(),
+        ));
         l.attachment_hints = req.view.attachment_hints.clone();
         l
     }))
@@ -1189,6 +1203,7 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
         nodes,
         bundles,
         positions,
+        focus_positions: None,
     })
 }
 
@@ -2705,6 +2720,20 @@ pub fn move_entity(req: &MoveRequest) -> Result<View, String> {
     }
     validate(&req.document)?;
     validate_view(&req.view)?;
+    // In a focus, arrange the focus: the same move over just the things it
+    // shows, from and into its own positions.
+    if let Some((document, view)) = focus_projection(&req.document, &req.view) {
+        let moved = move_entity(&MoveRequest {
+            document,
+            view,
+            entity: req.entity.clone(),
+            position: req.position,
+            dragging: req.dragging,
+        })?;
+        let mut out = req.view.clone();
+        out.focus.as_mut().unwrap().positions = moved.positions;
+        return Ok(out);
+    }
     let doc = &req.document;
     let base = place(doc, &req.view);
     let visible: BTreeMap<&str, &Node> = base.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
@@ -2975,6 +3004,7 @@ pub fn preview_layout(req: &LayoutRequest) -> Result<Layout, String> {
         nodes,
         bundles,
         positions,
+        focus_positions: None,
     })
 }
 #[wasm_bindgen]
@@ -4693,6 +4723,70 @@ mod tests {
         );
     }
     #[test]
+    fn a_focus_keeps_its_own_arrangement() {
+        let doc = sample();
+        let (full, _) = settled(&doc);
+        let mut view = full.clone();
+        view.focus = Some(Focus {
+            entities: vec!["kitchen".into()],
+            hops: Some(0),
+            direction: Direction::Both,
+            positions: BTreeMap::new(),
+        });
+        let req = |view: &View| LayoutRequest {
+            document: doc.clone(),
+            view: view.clone(),
+        };
+        // First layout: compact, handed back for the focus to keep.
+        let first = layout(&req(&view)).unwrap();
+        assert_eq!(first.positions, full.positions);
+        view.focus.as_mut().unwrap().positions = first.focus_positions.clone().unwrap();
+        // Drag the lamp onto the sensor inside the focus: they swap there.
+        let (lamp, sensor) = (
+            node(&first, "lamp").position,
+            node(&first, "sensor").position,
+        );
+        let moved = move_entity(&MoveRequest {
+            dragging: false,
+            document: doc.clone(),
+            view: view.clone(),
+            entity: "lamp".into(),
+            position: Point {
+                x: sensor.x + 10.,
+                y: sensor.y + 10.,
+            },
+        })
+        .unwrap();
+        assert_eq!(moved.positions, full.positions, "the full view never moves");
+        let after = layout(&req(&moved)).unwrap();
+        assert_eq!(node(&after, "sensor").position, lamp);
+        assert_eq!(
+            node(&after, "lamp").position,
+            Point {
+                x: sensor.x + 10.,
+                y: sensor.y + 10.
+            }
+        );
+        assert_separated(&doc, &after);
+        // Widening the focus keeps the arrangement and places the newcomers.
+        let mut wider = moved.clone();
+        wider.focus.as_mut().unwrap().hops = Some(1);
+        let wide = layout(&req(&wider)).unwrap();
+        assert!(wide.nodes.iter().any(|n| n.id == "panel"));
+        assert_eq!(
+            wide.focus_positions.as_ref().unwrap()["lamp"],
+            moved.focus.as_ref().unwrap().positions["lamp"]
+        );
+        // Leaving the focus shows the untouched full arrangement.
+        let mut out = moved.clone();
+        out.focus = None;
+        let plain = layout(&req(&out)).unwrap();
+        let original = layout(&req(&full)).unwrap();
+        for n in &original.nodes {
+            assert_eq!(node(&plain, &n.id).position, n.position, "{}", n.id);
+        }
+    }
+    #[test]
     fn focus_follows_hops_and_direction_and_keeps_the_full_view() {
         let doc = sample();
         let (view, _) = settled(&doc);
@@ -4715,6 +4809,7 @@ mod tests {
             entities: vec!["lamp".into()],
             hops: Some(1),
             direction: Direction::Both,
+            positions: BTreeMap::new(),
         });
         assert_eq!(
             set,
@@ -4737,6 +4832,7 @@ mod tests {
             entities: vec!["tv".into()],
             hops: None,
             direction: Direction::Upstream,
+            positions: BTreeMap::new(),
         });
         assert_eq!(
             set,
@@ -4750,6 +4846,7 @@ mod tests {
             entities: vec!["router".into()],
             hops: None,
             direction: Direction::Downstream,
+            positions: BTreeMap::new(),
         });
         assert_eq!(
             set,
@@ -4763,6 +4860,7 @@ mod tests {
             entities: vec!["kitchen".into()],
             hops: Some(0),
             direction: Direction::Both,
+            positions: BTreeMap::new(),
         });
         assert_eq!(
             set,

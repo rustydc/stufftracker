@@ -201,8 +201,10 @@ feed). For example, everything fed by the barn panel, drawn as a faceplate:
 }
 ```
 
-A focused view is laid out compactly by itself; its `positions` are those of
-the full view and are left untouched.
+A focused view starts with a compact layout of its own. Its arrangement lives
+in `focus.positions` (parent-relative, like `positions`), which dragging within
+the focus changes; the view's `positions` are the full view's and are left
+untouched.
 
 Saved views do not change inventory revisions and use last-writer-wins by ID,
 matching the existing HTTP behavior. View JSON and coordinates are validated;

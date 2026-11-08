@@ -35,7 +35,13 @@ type Connection = {
   endpoints: Endpoint[];
 };
 type Direction = "both" | "upstream" | "downstream";
-type Focus = { entities: string[]; hops?: number; direction?: Direction };
+type Focus = {
+  entities: string[];
+  hops?: number;
+  direction?: Direction;
+  /** The focus's own arrangement; never the full view's. */
+  positions?: Record<string, Point>;
+};
 type PortBox = {
   id: string;
   label: string;
@@ -67,6 +73,7 @@ type Layout = {
   layout_version: number;
   unrouted_connections: string[];
   positions: Record<string, Point>;
+  focus_positions?: Record<string, Point>;
   nodes: {
     id: string;
     position: Point;
@@ -144,6 +151,9 @@ function applyLayout(layout: Layout) {
   view.attachment_hints = current.attachment_hints;
   view.positions = current.positions;
   view.layout_version = current.layout_version;
+  // A focus keeps the arrangement it was laid out in (and dragged into).
+  if (view.focus && layout.focus_positions)
+    view.focus.positions = layout.focus_positions;
 }
 function setFocus(focus: Focus | null) {
   if (focus) view.focus = focus;
@@ -166,20 +176,22 @@ function renderBars() {
         : names.join(", ");
     const dir = f.direction || "both";
     bar.innerHTML = `<span class="focus-label">${dir === "upstream" ? "What feeds" : dir === "downstream" ? "What is fed by" : "Around"} <b>${esc(what)}</b> · ${current.nodes.filter((n) => !n.container || n.collapsed).length} shown</span><span class="seg" role="group" aria-label="Direction">${(["both", "upstream", "downstream"] as const).map((d) => `<button data-dir="${d}" class="${d === dir ? "on" : ""}">${{ both: "↔ Both", upstream: "↑ Feeds", downstream: "↓ Fed" }[d]}</button>`).join("")}</span><span class="seg" role="group" aria-label="Hops">${[1, 2, 3, 0].map((h) => `<button data-hops="${h}" class="${(f.hops ?? 0) === h ? "on" : ""}">${h || "All"}</button>`).join("")}</span><button id="exit-focus">✕ Show everything</button>`;
-    bar
-      .querySelectorAll<HTMLButtonElement>("[data-dir]")
-      .forEach(
-        (b) =>
-          (b.onclick = () =>
-            setFocus({ ...f, direction: b.dataset.dir as Direction })),
-      );
-    bar
-      .querySelectorAll<HTMLButtonElement>("[data-hops]")
-      .forEach(
-        (b) =>
-          (b.onclick = () =>
-            setFocus({ ...f, hops: Number(b.dataset.hops) || undefined })),
-      );
+    bar.querySelectorAll<HTMLButtonElement>("[data-dir]").forEach(
+      (b) =>
+        (b.onclick = () =>
+          setFocus({
+            ...view.focus!,
+            direction: b.dataset.dir as Direction,
+          })),
+    );
+    bar.querySelectorAll<HTMLButtonElement>("[data-hops]").forEach(
+      (b) =>
+        (b.onclick = () =>
+          setFocus({
+            ...view.focus!,
+            hops: Number(b.dataset.hops) || undefined,
+          })),
+    );
     $("exit-focus").onclick = () => setFocus(null);
   }
   const pick = $("pick-bar");
@@ -869,7 +881,27 @@ function settle(id: string) {
     ),
   );
   view = { ...moved, focus: view.focus };
-  if (!view.focus) delete view.focus;
+  if (!view.focus) {
+    delete view.focus;
+    return;
+  }
+  // ...and inside the focus, whose own arrangement it also grew in.
+  const inFocus: Layout = JSON.parse(
+    preview(JSON.stringify({ document: doc, view })),
+  );
+  const m = inFocus.nodes.find((n) => n.id === id);
+  if (m)
+    view = JSON.parse(
+      move_node(
+        JSON.stringify({
+          document: doc,
+          view,
+          entity: id,
+          position: m.position,
+          dragging: false,
+        }),
+      ),
+    );
 }
 // Port edits are drafted in the form until applied.
 let draftPorts: {
@@ -1166,11 +1198,6 @@ svg.addEventListener("pointerdown", (ev) => {
     const node = current.nodes.find((n) => n.id === id)!;
     if (node.container && !node.collapsed && !target.closest(".space-header"))
       id = null;
-    // A focus is laid out compactly for reading; arrange the full view.
-    if (view.focus && id) {
-      id = null;
-      status("Exit the focus to rearrange things");
-    }
   }
   if (id) beginDrag();
   drag = {

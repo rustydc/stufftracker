@@ -65,9 +65,10 @@ automation. Subsequent boots preserve your data.
   **↑ What feeds this** and **↓ What this feeds** trace sources or targets
   through directed connections. The focus bar changes direction and hops
   (1, 2, 3, all) and **Show everything** leaves it. Shift-click or shift-drag a
-  lasso to pick several things, then **Show only these**. A focus is laid out
-  compactly on its own and never changes the full view's positions; exit it to
-  rearrange. Faceplates and focus are part of the view, so they save with it.
+  lasso to pick several things, then **Show only these**. A focus starts with a compact layout of its own and keeps its own
+  arrangement: drag things within it (swaps and pushes work as usual) and the
+  focus remembers, while the full view's positions never change. Changing
+  hops or direction keeps the arrangement; it saves with the view. Faceplates and focus are part of the view, so they save with it.
 - **Save view** stores positions, folded branches, layer visibility, faceplates
   and focus separately from inventory data. Selecting a saved view and saving
   updates it.

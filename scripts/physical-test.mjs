@@ -217,6 +217,7 @@ try {
 
   // Focus: trace what feeds the lamp, then widen and leave it.
   const before = await geometry("kitchen");
+  const utilityBefore = await geometry("utility");
   await page.locator('.tree-row[data-select="lamp"]').click();
   await page.locator('[data-focus="upstream"]').click();
   await page.waitForSelector("#focus-bar:not([hidden])");
@@ -233,6 +234,21 @@ try {
     1,
     "one hop either way reaches the sensor",
   );
+  // Things can be arranged within the focus; the arrangement is the focus's.
+  const sensorAt = async () =>
+    (await geometry("kitchen")).find((n) => n.id === "sensor");
+  const s0 = await sensorAt();
+  const box = await page.locator('.node[data-id="sensor"]').boundingBox();
+  await page.mouse.move(box.x + 30, box.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 30, box.y + 120, { steps: 5 });
+  await page.mouse.up();
+  await settled();
+  const s1 = await sensorAt();
+  assert(s1.y > s0.y + 50, "the sensor moved within the focus");
+  // Widening the focus keeps that arrangement.
+  await page.locator('#focus-bar [data-hops="2"]').click();
+  assert.equal((await sensorAt()).y, s1.y);
   await page.locator("#exit-focus").click();
   assert(await page.locator("#focus-bar").isHidden());
   assert.deepEqual(
@@ -240,6 +256,7 @@ try {
     before,
     "focus left the layout alone",
   );
+  assert.deepEqual(await geometry("utility"), utilityBefore);
 
   // Shift-click picks, then show only those.
   await page.keyboard.down("Shift");
@@ -258,7 +275,7 @@ try {
   await page.locator("#exit-focus").click();
   assert.deepEqual(errors, []);
   console.log(
-    "Physical checks passed: breaker schedule, faceplates, port pins, mains and linked half-space breakers, port editor, focus and trace, picking.",
+    "Physical checks passed: breaker schedule, faceplates, port pins, mains and linked half-space breakers, port editor, focus and trace, arranging within a focus, picking.",
   );
 } finally {
   if (original) {
