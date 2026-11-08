@@ -90,7 +90,9 @@ faceplate, so renaming a panel never drops its breakers. Change them with
   "ports": [
     {
       "id": "1",
-      "label": "20 A outlet below C",
+      "label": "Outlet below C",
+      "amps": 20,
+      "protection": "gfci",
       "position": 1,
       "poles": 1,
       "half": ""
@@ -148,7 +150,12 @@ faceplate, so renaming a panel never drops its breakers. Change them with
   at it (a subpanel's main lugs, a transfer switch's utility and generator
   inputs as two mains). A back-fed main breaker in branch spaces is an
   ordinary breaker.
-- `label` is free text: amps, speed or PoE, what the terminal drives.
+- `amps` is the rating printed on the handle (`0` if unknown) and
+  `protection` is `gfci`, `afci`, `dual` (arc- and ground-fault) or `none`.
+  Keep both out of `label`: the faceplate prints the amps sideways on each
+  breaker's handle and badges GF/AF/DF, and the schedule shows them.
+- `label` is free text: what it feeds or is labelled, speed or PoE for a
+  switch port, what a terminal drives.
 
 Overlapping spaces, duplicate IDs, more than three poles, or a half other than
 A/B are rejected. A connection endpoint names a port with `port` (empty when

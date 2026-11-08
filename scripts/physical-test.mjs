@@ -127,12 +127,16 @@ try {
     ["7A", "7", "1", "A"],
   ]) {
     await page.locator("#add-port").click();
-    const row = page.locator("tr[data-row]").last();
+    const row = page.locator(".port-row[data-row]").last();
     await row.locator('[name="id"]').fill(id);
     await row.locator('[name="position"]').fill(pos);
     await row.locator('[name="poles"]').selectOption(poles);
     await row.locator('[name="half"]').fill(half);
   }
+  // Ratings are port data: 20 A GFCI on 7A, typed into the editor.
+  const a7 = page.locator(".port-row[data-row]").last();
+  await a7.locator('[name="amps"]').fill("20");
+  await a7.locator('[name="protection"]').selectOption("gfci");
   await page.locator("#ports-form button:not([type])").click();
   await page.waitForSelector(
     '.node.faceplate[data-id="panel"] [data-port="MAIN"]',
@@ -152,6 +156,22 @@ try {
   });
   assert(linked.main[0] < linked.one[0], "the main row sits above space 1");
   assert(linked.a7[0] + linked.a7[1] < linked.b79[0], "7B/9A starts below 7A");
+  const sevenA = page.locator(
+    '.node.faceplate[data-id="panel"] [data-port="7A"]',
+  );
+  assert.equal(
+    await sevenA.locator(".amps").textContent(),
+    "20",
+    "rating on the handle",
+  );
+  assert.equal(await sevenA.locator(".badge.gfci").count(), 1);
+  assert.match(
+    await page
+      .locator(".schedule tbody tr", { hasText: "7A" })
+      .first()
+      .textContent(),
+    /20 A · GFCI/,
+  );
   await page.locator(".port-editor summary").click();
 
   // Port editor: a 12-port switch, label one, assign the Ethernet uplink.
@@ -159,7 +179,9 @@ try {
   await page.locator(".port-editor summary").click();
   await page.locator('select[name="faceplate"]').selectOption("switch");
   await page.locator("#number-ports").click();
-  await page.locator('tr[data-row="2"] input[name="label"]').fill("TV uplink");
+  await page
+    .locator('.port-row[data-row="2"] input[name="label"]')
+    .fill("TV uplink");
   await page.locator("#ports-form button:not([type])").click();
   await page.waitForFunction(
     () => document.querySelectorAll(".schedule tbody tr").length === 13,
@@ -167,7 +189,9 @@ try {
   await page.locator('select[data-assign="ethernet"]').selectOption("3");
   // A collision is refused with a message, leaving the inventory alone (the
   // editor stays open after applying).
-  await page.locator('tr[data-row="1"] input[name="position"]').fill("1");
+  await page
+    .locator('.port-row[data-row="1"] input[name="position"]')
+    .fill("1");
   await page.locator("#ports-form button:not([type])").click();
   await page.waitForFunction(() =>
     document

@@ -47,7 +47,9 @@ automation. Subsequent boots preserve your data.
   spaces, or controller terminals. Edit them under **Physical layout & ports**:
   pick a layout (breaker panel, network switch, terminal strip), add ports one
   at a time or numbered in bulk, and give each an ID, starting position, pole
-  count, tandem half (A/B) and label. Panels number spaces odd down the left
+  count, tandem half (A/B), rating in amps, GFCI/AFCI/dual protection, and
+  label. Breakers draw with their rating sideways on the handle, like the
+  real thing, and a GF/AF/DF badge. Panels number spaces odd down the left
   and even down the right; a breaker of N poles covers position, position+2, …
   on its side (a 240 V breaker is 2), and tandem halves share one space. A
   linked breaker that changes half between spaces takes one half per space

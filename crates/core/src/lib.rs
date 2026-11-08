@@ -59,6 +59,22 @@ pub struct Port {
     /// numbered positions, where an incoming feed lands. Takes no position.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub main: bool,
+    /// Breaker or circuit rating in amps, as printed on the handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amps: Option<u32>,
+    /// Ground-fault / arc-fault protection built into the breaker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection: Option<Protection>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Protection {
+    /// Ground-fault circuit interrupter.
+    Gfci,
+    /// Arc-fault circuit interrupter.
+    Afci,
+    /// Dual function: both arc-fault and ground-fault.
+    Dual,
 }
 impl Port {
     fn poles(&self) -> u32 {
@@ -358,6 +374,9 @@ fn validate_ports(e: &Entity) -> Result<(), String> {
                 "{}: port {} halves needs one of A, B or \"\" per pole (and no half)",
                 e.name, p.id
             ));
+        }
+        if p.amps.is_some_and(|a| a == 0 || a > 4000) {
+            return Err(format!("{}: port {} amps must be 1-4000", e.name, p.id));
         }
         if p.main && p.position.is_some() {
             return Err(format!(
@@ -4303,6 +4322,8 @@ mod tests {
             half: half.map(Into::into),
             halves: Vec::new(),
             main: false,
+            amps: None,
+            protection: None,
         }
     }
     /// The sample with a breaker schedule on its panel: 1 kitchen, 2 living,
@@ -4538,6 +4559,32 @@ mod tests {
         let p = bad.entities.iter_mut().find(|e| e.id == "panel").unwrap();
         p.ports[0].position = Some(11);
         assert!(validate(&bad).is_err(), "a main takes no position");
+    }
+    #[test]
+    fn ratings_and_protection_are_port_data() {
+        let json = r#"{"id":"14","position":14,"amps":20,"protection":"gfci","label":"Bath"}"#;
+        let p: Port = serde_json::from_str(json).unwrap();
+        assert_eq!((p.amps, p.protection), (Some(20), Some(Protection::Gfci)));
+        assert_eq!(serde_json::to_value(&p).unwrap()["protection"], "gfci");
+        for (name, value) in [("afci", Protection::Afci), ("dual", Protection::Dual)] {
+            let p: Port =
+                serde_json::from_str(&format!(r#"{{"id":"x","protection":"{name}"}}"#)).unwrap();
+            assert_eq!(p.protection, Some(value));
+        }
+        // Unrated ports omit the fields entirely.
+        assert!(
+            serde_json::to_value(port("1", 1, 1, None))
+                .unwrap()
+                .get("amps")
+                .is_none()
+        );
+        let mut doc = panel_doc();
+        let panel = doc.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        panel.ports[0].amps = Some(0);
+        assert!(validate(&doc).is_err());
+        let panel = doc.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        panel.ports[0].amps = Some(200);
+        validate(&doc).unwrap();
     }
     #[test]
     fn faceplate_wires_attach_at_their_ports() {

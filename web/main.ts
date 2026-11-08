@@ -13,6 +13,9 @@ type Port = {
   halves?: string[];
   /** The supply (main breaker, main lugs, uplink), drawn above the positions. */
   main?: boolean;
+  /** Breaker or circuit rating, as printed on the handle. */
+  amps?: number;
+  protection?: "gfci" | "afci" | "dual";
 };
 type Entity = {
   id: string;
@@ -279,32 +282,88 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
           .filter((ep) => ep.entity !== e.id)
           .map((ep) => doc.entities.find((x) => x.id === ep.entity)!.name),
       );
-  const slot = (b: PortBox, cls: string, title: string) => {
-    const text = [b.label, ...(b.id ? fed(b.id) : [])].filter(Boolean)[0] || "";
-    const max = Math.max(4, Math.floor((b.width - 44) / 6.2));
-    const small = b.height < 14;
-    return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/><text class="slot-pos" x="${b.x + 5}" y="${b.y + (small ? 9 : 13)}">${esc(b.position || "·")}</text><text class="slot-label ${small ? "tiny" : ""}" x="${b.x + 38}" y="${b.y + (small ? 9 : 13)}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text><title>${esc(title)}</title></g>`;
+  const portOf = (id: string) => e.ports?.find((p) => p.id === id);
+  const panel = f.kind === "panel";
+  const HANDLE = 15;
+  // On a panel, each breaker's handle faces the bus: the inner edge of its
+  // column (the right end of a main row), with its rating printed sideways.
+  const handleX = (b: PortBox) =>
+    b.side === "right" ? b.x + 2 : b.x + b.width - HANDLE - 2;
+  const handle = (b: PortBox, p?: Port) => {
+    if (!panel || !b.id) return "";
+    const x = handleX(b),
+      h = Math.max(4, b.height - 4);
+    const amps = p?.amps && !b.segment ? String(p.amps) : "";
+    const cx = x + HANDLE / 2,
+      cy = b.y + 2 + h / 2;
+    // Sideways like a breaker handle where there is room; a half-height
+    // tandem handle is too short for that, so its rating sits upright.
+    const upright = h < 12;
+    const size = upright
+      ? Math.min(7, (HANDLE - 2) / Math.max(1, amps.length * 0.6))
+      : Math.max(6, Math.min(9, (h - 3) / Math.max(1, amps.length * 0.62)));
+    return `<rect class="handle" x="${x}" y="${b.y + 2}" width="${HANDLE}" height="${h}" rx="2"/>${amps ? `<text class="amps" style="font-size:${size}px" transform="translate(${cx},${cy})${upright ? "" : " rotate(-90)"}">${amps}</text>` : ""}`;
   };
+  const PROTECTION = { gfci: "GF", afci: "AF", dual: "DF" } as const;
+  const badge = (b: PortBox, p?: Port) => {
+    if (!p?.protection || b.segment) return "";
+    const w = 15,
+      h = Math.min(10, b.height - 2);
+    const x = panel
+      ? b.side === "right"
+        ? b.x + HANDLE + 5
+        : b.x + b.width - HANDLE - w - 5
+      : b.x + b.width - w - 4;
+    return `<g class="badge ${p.protection}"><rect x="${x}" y="${b.y + (b.height - h) / 2}" width="${w}" height="${h}" rx="2"/><text x="${x + w / 2}" y="${b.y + b.height / 2}">${PROTECTION[p.protection]}</text></g>`;
+  };
+  const slot = (b: PortBox, cls: string, title: string) => {
+    const p = b.id ? portOf(b.id) : undefined;
+    const text = [b.label, ...(b.id ? fed(b.id) : [])].filter(Boolean)[0] || "";
+    // Text starts past the handle on the right column.
+    const left = panel && b.id && b.side === "right" ? b.x + HANDLE + 4 : b.x;
+    const reserved =
+      (panel && b.id ? HANDLE + 4 : 0) + (p?.protection ? 19 : 0);
+    const max = Math.max(4, Math.floor((b.width - 44 - reserved) / 6.2));
+    const small = b.height < 14;
+    const baseline = b.y + (small ? 9 : 13);
+    const textX =
+      left + (p?.protection && panel && b.side === "right" ? 19 : 0);
+    return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/><text class="slot-pos" x="${textX + 5}" y="${baseline}">${esc(b.position || "·")}</text><text class="slot-label ${small ? "tiny" : ""}" x="${textX + 38}" y="${baseline}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text>${handle(b, p)}${badge(b, p)}<title>${esc(title)}</title></g>`;
+  };
+  const rating = (p?: Port) =>
+    [
+      p?.amps ? `${p.amps} A` : "",
+      p?.protection ? PROTECTION_NAME[p.protection] : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
   let body = "",
     ties = "";
   for (const b of f.empty)
     body += slot(b, "empty", `Space ${b.position}: empty`);
   for (const b of f.ports) {
     if (b.segment) {
-      // A linked breaker's later space: tie it to the first, like the
-      // handle tie on the breaker itself.
+      // A linked breaker's later space: tie its handle to the first one's,
+      // like the handle tie on the breaker itself.
       const first = f.ports.find((p) => p.id === b.id && !p.segment)!;
-      const x = b.x + b.width - 7;
-      body += `<g class="slot used tied"><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/><text class="slot-pos" x="${b.x + 5}" y="${b.y + 9}">${esc(b.position)}</text><text class="slot-label tiny" x="${b.x + 38}" y="${b.y + 9}">↑ ${esc(b.id)}</text></g>`;
+      // Beside the handles, so it never hides a rating it crosses.
+      const x = panel
+        ? b.side === "right"
+          ? handleX(b) + HANDLE + 3
+          : handleX(b) - 3
+        : b.x + b.width - 7;
+      const left = panel && b.side === "right" ? b.x + HANDLE + 4 : b.x;
+      body += `<g class="slot used tied"><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/><text class="slot-pos" x="${left + 5}" y="${b.y + 9}">${esc(b.position)}</text><text class="slot-label tiny" x="${left + 38}" y="${b.y + 9}">↑ ${esc(b.id)}</text>${handle(b, portOf(b.id))}</g>`;
       // Drawn last, over any breaker the tie crosses (a quad's inner pair).
       ties += `<path class="tie" d="M${x},${first.y + first.height / 2} V${b.y + b.height / 2}"><title>${esc(b.id)}: one linked breaker</title></path>`;
       continue;
     }
     const names = fed(b.id);
+    const r = rating(portOf(b.id));
     body += slot(
       b,
       names.length ? "used" : "spare",
-      `${b.position ? b.position + " · " : ""}${b.id}${b.label ? " · " + b.label : ""}${names.length ? "\n→ " + names.join(", ") : "\nNothing connected"}`,
+      `${b.position ? b.position + " · " : ""}${b.id}${r ? " · " + r : ""}${b.label ? " · " + b.label : ""}${names.length ? "\n→ " + names.join(", ") : "\nNothing connected"}`,
     );
   }
   if (f.unassigned)
@@ -343,6 +402,11 @@ function renderLayers() {
     )
     .join("");
 }
+const PROTECTION_NAME = {
+  gfci: "GFCI",
+  afci: "AFCI",
+  dual: "AFCI/GFCI",
+} as const;
 const portOrder = (a: Port, b: Port) =>
   Number(!!b.main) - Number(!!a.main) ||
   (a.position ?? 1e9) - (b.position ?? 1e9) ||
@@ -385,6 +449,17 @@ function schedule(e: Entity) {
     unassigned: mine.filter((c) => !at(c)).map((c) => ({ c, to: linked(c) })),
   };
 }
+const ratingText = (p: Port) =>
+  [
+    p.amps ? `${p.amps} A` : "",
+    p.protection ? PROTECTION_NAME[p.protection] : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+const ratingHtml = (p: Port) =>
+  ratingText(p)
+    ? `<span class="rating ${p.protection || ""}">${esc(ratingText(p))}</span>`
+    : "";
 function scheduleHtml(e: Entity) {
   if (!e.ports?.length) return "";
   const { rows, unassigned } = schedule(e);
@@ -401,7 +476,7 @@ function scheduleHtml(e: Entity) {
   return `<div class="schedule"><div class="schedule-head"><h3>${e.faceplate === "panel" ? "Panel schedule" : "Ports"}</h3><button type="button" class="print-schedule">Print</button></div><table><thead><tr><th>${e.faceplate === "panel" ? "Space" : "#"}</th><th>Port</th><th>Connected to</th></tr></thead><tbody>${rows
     .map(
       (r) =>
-        `<tr><td>${esc(r.position)}</td><td><b>${esc(r.port.id)}</b>${r.port.label ? `<small>${esc(r.port.label)}</small>` : ""}</td><td>${cell(r.connections)}</td></tr>`,
+        `<tr><td>${esc(r.position)}</td><td><b>${esc(r.port.id)}</b>${ratingHtml(r.port)}${r.port.label ? `<small>${esc(r.port.label)}</small>` : ""}</td><td>${cell(r.connections)}</td></tr>`,
     )
     .join(
       "",
@@ -443,14 +518,14 @@ function portEditorHtml(e: Entity) {
     ? draft.ports
     : (e.ports || []).map((p) => ({ ...p, orig: p.id }));
   const faceplate = draft ? draft.faceplate : e.faceplate;
-  return `<details class="port-editor" ${portEditorOpen ? "open" : ""}><summary>Physical layout &amp; ports</summary><form id="ports-form"><label class="field">Layout<select name="faceplate"><option value="">None</option>${(["panel", "switch", "terminals"] as const).map((k) => `<option value="${k}" ${faceplate === k ? "selected" : ""}>${{ panel: "Breaker panel", switch: "Network switch", terminals: "Terminal strip" }[k]}</option>`).join("")}</select></label><table class="port-rows"><thead><tr><th>ID</th><th title="Starting space or port number, or main">Pos</th><th title="Spaces covered (2 for a 240 V breaker)">Poles</th><th title="Tandem half: A or B, or one per space (B/A)">½</th><th>Label</th><th></th></tr></thead><tbody>${ports
+  return `<details class="port-editor" ${portEditorOpen ? "open" : ""}><summary>Physical layout &amp; ports</summary><form id="ports-form"><label class="field">Layout<select name="faceplate"><option value="">None</option>${(["panel", "switch", "terminals"] as const).map((k) => `<option value="${k}" ${faceplate === k ? "selected" : ""}>${{ panel: "Breaker panel", switch: "Network switch", terminals: "Terminal strip" }[k]}</option>`).join("")}</select></label><div class="port-rows"><div class="port-head"><span>ID</span><span title="Starting space or port number, or main">Pos</span><span title="Spaces covered (2 for a 240 V breaker)">Poles</span><span title="Tandem half: A or B, or one per space (B/A)">½</span><span></span></div>${ports
     .map(
       (p, i) =>
-        `<tr data-row="${i}" ${p.orig ? `data-orig="${esc(p.orig)}"` : ""}><td><input name="id" value="${esc(p.id)}" required maxlength="40"></td><td><input name="position" inputmode="numeric" pattern="[0-9]{1,3}|[Mm][Aa][Ii][Nn]" placeholder="#" title="Starting space or port number, or main for the supply" value="${p.main ? "main" : (p.position ?? "")}"></td><td><select name="poles">${[1, 2, 3].map((n) => `<option ${(p.poles || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select></td><td><input name="half" pattern="[ABab]|([ABab-]/)+[ABab-]" title="A or B for a tandem half; one per space for a linked breaker, e.g. B/A (- for a whole space)" value="${esc(p.halves?.length ? p.halves.map((h) => h || "-").join("/") : p.half || "")}"></td><td><input name="label" value="${esc(p.label || "")}" maxlength="200"></td><td><button type="button" class="remove-port" aria-label="Remove port ${esc(p.id)}">✕</button></td></tr>`,
+        `<div class="port-row" data-row="${i}" ${p.orig ? `data-orig="${esc(p.orig)}"` : ""}><div class="l1"><input name="id" value="${esc(p.id)}" required maxlength="40" aria-label="Port ID"><input name="position" inputmode="numeric" pattern="[0-9]{1,3}|[Mm][Aa][Ii][Nn]" placeholder="#" title="Starting space or port number, or main for the supply" aria-label="Position" value="${p.main ? "main" : (p.position ?? "")}"><select name="poles" aria-label="Poles">${[1, 2, 3].map((n) => `<option ${(p.poles || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select><input name="half" pattern="[ABab]|([ABab-]/)+[ABab-]" title="A or B for a tandem half; one per space for a linked breaker, e.g. B/A (- for a whole space)" aria-label="Half" value="${esc(p.halves?.length ? p.halves.map((h) => h || "-").join("/") : p.half || "")}"><button type="button" class="remove-port" aria-label="Remove port ${esc(p.id)}">✕</button></div><div class="l2"><input name="amps" inputmode="numeric" pattern="[0-9]{1,4}" placeholder="A" title="Rating in amps" aria-label="Amps" value="${p.amps ?? ""}"><select name="protection" aria-label="Protection" title="Built-in protection"><option value="">—</option>${(["gfci", "afci", "dual"] as const).map((k) => `<option value="${k}" ${p.protection === k ? "selected" : ""}>${PROTECTION_NAME[k]}</option>`).join("")}</select><input name="label" value="${esc(p.label || "")}" maxlength="200" placeholder="Label" aria-label="Label"></div></div>`,
     )
     .join(
       "",
-    )}</tbody></table><div class="button-row"><button type="button" id="add-port">＋ Port</button><button type="button" id="number-ports" title="Add numbered ports up to a count">＋ Numbered…</button><button>Apply ports</button></div></form></details>`;
+    )}</div><div class="button-row"><button type="button" id="add-port">＋ Port</button><button type="button" id="number-ports" title="Add numbered ports up to a count">＋ Numbered…</button><button>Apply ports</button></div></form></details>`;
 }
 let portEditorOpen = false;
 function renderInspector() {
@@ -569,7 +644,7 @@ function renderInspector() {
     const details = portsForm.closest("details")!;
     details.ontoggle = () => (portEditorOpen = details.open);
     const rows = (): (Port & { orig?: string })[] =>
-      [...portsForm.querySelectorAll<HTMLTableRowElement>("tr[data-row]")].map(
+      [...portsForm.querySelectorAll<HTMLElement>(".port-row[data-row]")].map(
         (tr) => {
           const v = (n: string) =>
             tr
@@ -585,6 +660,9 @@ function renderInspector() {
           if (/^main$/i.test(v("position"))) p.main = true;
           else if (v("position")) p.position = Number(v("position"));
           if (Number(v("poles")) > 1) p.poles = Number(v("poles"));
+          if (Number(v("amps")) > 0) p.amps = Number(v("amps"));
+          if (v("protection"))
+            p.protection = v("protection") as Port["protection"];
           const half = v("half").toUpperCase();
           if (half.includes("/"))
             p.halves = half.split("/").map((h) => (h === "-" ? "" : h));
@@ -604,7 +682,7 @@ function renderInspector() {
     portsForm.querySelectorAll<HTMLButtonElement>(".remove-port").forEach(
       (b) =>
         (b.onclick = () => {
-          const i = Number(b.closest("tr")!.dataset.row);
+          const i = Number(b.closest<HTMLElement>(".port-row")!.dataset.row);
           redraw(rows().filter((_, k) => k !== i));
         }),
     );
@@ -791,14 +869,14 @@ function printSchedule(e: Entity) {
   const w = window.open("", "_blank");
   if (!w) return status("Allow pop-ups to print the schedule", true);
   w.document.write(
-    `<!doctype html><meta charset="utf-8"><title>${esc(e.name)}</title><style>body{font:13px system-ui,sans-serif;margin:24px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:4px 6px;text-align:left;vertical-align:top}small{color:#555}hr{border:0;border-top:1px dotted #bbb;margin:3px 0}</style><h1>${esc(e.name)}</h1><table><tr><th>${e.faceplate === "panel" ? "Space" : "#"}</th><th>Port</th><th>Label</th><th>Connected to</th></tr>${rows
+    `<!doctype html><meta charset="utf-8"><title>${esc(e.name)}</title><style>body{font:13px system-ui,sans-serif;margin:24px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #999;padding:4px 6px;text-align:left;vertical-align:top}small{color:#555}hr{border:0;border-top:1px dotted #bbb;margin:3px 0}</style><h1>${esc(e.name)}</h1><table><tr><th>${e.faceplate === "panel" ? "Space" : "#"}</th><th>Port</th><th>Rating</th><th>Label</th><th>Connected to</th></tr>${rows
       .map(
         (r) =>
-          `<tr><td>${esc(r.position)}</td><td>${esc(r.port.id)}</td><td>${esc(r.port.label || "")}</td><td>${cell(r.connections)}</td></tr>`,
+          `<tr><td>${esc(r.position)}</td><td>${esc(r.port.id)}</td><td>${esc(ratingText(r.port))}</td><td>${esc(r.port.label || "")}</td><td>${cell(r.connections)}</td></tr>`,
       )
       .join(
         "",
-      )}${unassigned.length ? `<tr><td>?</td><td colspan=2>Not assigned to a port</td><td>${cell(unassigned)}</td></tr>` : ""}</table><script>print()<\/script>`,
+      )}${unassigned.length ? `<tr><td>?</td><td colspan=3>Not assigned to a port</td><td>${cell(unassigned)}</td></tr>` : ""}</table><script>print()<\/script>`,
   );
   w.document.close();
 }

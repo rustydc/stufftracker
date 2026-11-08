@@ -951,3 +951,94 @@ label.toggle {
 .port-rows td:nth-child(4) {
   width: 44px;
 }
+/* Breaker handles: the rating printed sideways, as on the breaker. */
+.node.faceplate .slot rect.handle,
+.node.faceplate .slot.used rect.handle {
+  fill: #3f4d45;
+  stroke: #2b3630;
+}
+.node.faceplate .slot.spare rect.handle,
+.node.faceplate .slot.tied rect.handle {
+  fill: #6d7a72;
+  stroke: #56635b;
+}
+.node.faceplate .amps {
+  fill: #fff;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: central;
+  letter-spacing: -0.2px;
+}
+.node.faceplate .slot .badge rect {
+  stroke: none;
+}
+.node.faceplate .badge text {
+  font-size: 6.5px;
+  font-weight: 800;
+  fill: #fff;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+.node.faceplate .slot .badge.gfci rect {
+  fill: #2f6fb8;
+}
+.node.faceplate .slot .badge.afci rect {
+  fill: #c9742a;
+}
+.node.faceplate .slot .badge.dual rect {
+  fill: #7a52b3;
+}
+.rating {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 650;
+  color: #4b6152;
+}
+.rating.gfci {
+  color: #2f6fb8;
+}
+.rating.afci {
+  color: #b5651f;
+}
+.rating.dual {
+  color: #7a52b3;
+}
+/* Port editor: two lines per port. */
+.port-head,
+.port-row .l1 {
+  display: grid;
+  grid-template-columns: 1fr 42px 40px 44px 22px;
+  gap: 3px;
+  align-items: center;
+}
+.port-head {
+  font-size: 10px;
+  color: #82917f;
+  font-weight: 600;
+  margin-top: 6px;
+}
+.port-row {
+  padding: 4px 0;
+  border-top: 1px solid #e6ebe4;
+}
+.port-row .l2 {
+  display: grid;
+  grid-template-columns: 42px 76px 1fr;
+  gap: 3px;
+  margin-top: 3px;
+}
+.port-row input,
+.port-row select {
+  width: 100%;
+  min-width: 0;
+  font-size: 11px;
+  padding: 2px 3px;
+  border: 1px solid #d6dfd5;
+  border-radius: 4px;
+}
+.port-row .remove-port {
+  padding: 1px 4px;
+  border: 0;
+  background: none;
+  color: #a34b3b;
+}

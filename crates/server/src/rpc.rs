@@ -6,7 +6,7 @@ use crate::{
 use capnp::capability::{FromClientHook, Promise};
 use std::rc::Rc;
 use stufftracker_core::{
-    Connection, Document, Endpoint, Entity, ExternalLink, Faceplate, Layer, Port, Role,
+    Connection, Document, Endpoint, Entity, ExternalLink, Faceplate, Layer, Port, Protection, Role,
 };
 use wire::stuff_tracker_v1 as api;
 
@@ -88,6 +88,16 @@ fn ports_read(list: capnp::struct_list::Reader<'_, wire::port::Owned>) -> capnp:
                     .map(text)
                     .collect::<capnp::Result<_>>()?,
                 main: p.get_main(),
+                amps: Some(p.get_amps() as u32).filter(|a| *a > 0),
+                protection: match p
+                    .get_protection()
+                    .map_err(|_| invalid("Unknown protection"))?
+                {
+                    wire::Protection::None => None,
+                    wire::Protection::Gfci => Some(Protection::Gfci),
+                    wire::Protection::Afci => Some(Protection::Afci),
+                    wire::Protection::Dual => Some(Protection::Dual),
+                },
             })
         })
         .collect()
@@ -101,6 +111,13 @@ fn ports_write(mut list: capnp::struct_list::Builder<'_, wire::port::Owned>, por
         b.set_poles(p.poles.unwrap_or(1).min(255) as u8);
         b.set_half(p.half.as_deref().unwrap_or(""));
         b.set_main(p.main);
+        b.set_amps(p.amps.unwrap_or(0).min(u16::MAX as u32) as u16);
+        b.set_protection(match p.protection {
+            None => wire::Protection::None,
+            Some(Protection::Gfci) => wire::Protection::Gfci,
+            Some(Protection::Afci) => wire::Protection::Afci,
+            Some(Protection::Dual) => wire::Protection::Dual,
+        });
         let mut halves = b.init_halves(p.halves.len() as u32);
         for (k, h) in p.halves.iter().enumerate() {
             halves.set(k as u32, h);
@@ -722,6 +739,8 @@ mod tests {
                 half: None,
                 halves: Vec::new(),
                 main: false,
+                amps: Some(20),
+                protection: Some(Protection::Gfci),
             },
             Port {
                 id: "3/5".into(),
@@ -731,6 +750,8 @@ mod tests {
                 half: None,
                 halves: vec!["B".into(), "A".into()],
                 main: false,
+                amps: Some(30),
+                protection: None,
             },
             Port {
                 id: "MAIN".into(),
@@ -740,6 +761,8 @@ mod tests {
                 half: None,
                 halves: Vec::new(),
                 main: true,
+                amps: Some(100),
+                protection: None,
             },
         ];
         let mut req = c.put_ports_request();
