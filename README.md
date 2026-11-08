@@ -9,7 +9,8 @@ handles browser input.
 ## Run standalone
 
 Prerequisites: Rust 1.95+, Node 22+, a C compiler (bundled SQLite), the
-`wasm32-unknown-unknown` Rust target, and `wasm-bindgen-cli` **0.2.114**.
+`wasm32-unknown-unknown` Rust target, `wasm-bindgen-cli` **0.2.114**, and the
+Cap’n Proto compiler (`capnp`, tested with 1.0.2).
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -67,9 +68,11 @@ That produces `img.tar` beside `darude.app.yaml`. The packer includes the Rust
 binary and its shared-library closure in a standard OCI archive, without Docker
 or a dependency on the Darude checkout. Install the directory through
 Darude's `POST /api/apps` with `{"appDir":"/absolute/path/to/stufftracker"}`.
-The platform's HTTP-only readiness gate is the Unix socket binding, which happens
-**after** SQLite setup. State uses `DARUDE_STATE_DIR`; HTTP uses
-`DARUDE_HTTP_SOCKET`. No capnp bootstrap is necessary for this HTTP-only version.
+State uses `DARUDE_STATE_DIR`; HTTP uses `DARUDE_HTTP_SOCKET`. After SQLite
+setup and HTTP binding, the grain registers with `DARUDE_PLATFORM_SOCKET` and
+announces its app-owned `stufftracker.v1` capability schema. Registration is the
+Darude readiness signal. See [the capability API](docs/darude-api.md) for methods,
+revision handling, permission rules, and examples.
 A grain never binds a TCP listener. Missing Darude permissions fail closed for
 writes: only `write` or `owner` in the proxy-injected `X-Darude-Permissions` allows
 inventory or saved-view mutation. Read shares can rearrange their local view and
@@ -182,8 +185,8 @@ HTML loaded offline with no HTTP requests. Managed Chrome blocks `file:` navigat
 in this environment, so the test feeds the downloaded HTML directly to an offline
 browser context. The Darude package should additionally
 be verified against a running platform across cold start, restart and hibernation
-before treating it as released. A capnp tool surface and capability-mediated HA
-integration are intentionally deferred.
+before treating it as released. Capability-mediated Home Assistant integration
+is deferred; `stufftracker.v1` can already read and write external-link metadata.
 
 `test:grain` runs an isolated process with a disposable SQLite database and Unix
 socket, checking readiness, share permissions, revision conflicts, saved views,

@@ -44,7 +44,7 @@ async function boot() {
       10000,
     );
     child.stderr.on("data", (b) => {
-      if (b.toString().includes("ready on")) {
+      if (b.toString().includes("HTTP bound on")) {
         clearTimeout(timeout);
         done();
       }

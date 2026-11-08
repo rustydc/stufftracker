@@ -197,7 +197,7 @@ impl Rect {
             && p.y < self.position.y + self.height + pad
     }
 }
-fn validate_view(view: &View) -> Result<(), String> {
+pub fn validate_view(view: &View) -> Result<(), String> {
     if view
         .positions
         .values()

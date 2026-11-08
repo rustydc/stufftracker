@@ -1,6 +1,6 @@
 [package]
 name = "stufftracker"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 [dependencies]
 stufftracker-core = { path = "../core" }
@@ -9,3 +9,15 @@ tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+capnp = "0.20"
+capnp-rpc = "0.20"
+darude-runtime = { path = "../../vendor/darude/crates/runtime" }
+anyhow = "1"
+[build-dependencies]
+capnpc = "0.20"
+darude-schema-docs = { path = "../../vendor/darude/crates/schema-docs" }
+[dev-dependencies]
+darude-wire = { path = "../../vendor/darude/crates/wire" }
+futures = "0.3"
+tokio-util = { version = "0.7", features = ["compat"] }

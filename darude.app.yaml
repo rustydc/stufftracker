@@ -1,8 +1,8 @@
 id: stufftracker
 name: StuffTracker
-version: 0.1.0
+version: 0.2.0
 # One grain = one inventory. Read shares may explore and export a snapshot;
-# write shares may edit inventory and save views. HTTP enforces these rights.
+# write shares may edit inventory and save views. HTTP and RPC enforce these rights.
 rights: [read, write]
 runtime:
   type: image
@@ -12,5 +12,6 @@ runtime:
 routes:
   - path: /
     type: http
-# HTTP-only grain: socket binding signals readiness, after SQLite migrations.
+# App-owned schema is announced at ABI v2 registration, after SQLite and HTTP are ready.
+api: stufftracker.v1
 # No ambient network access or Home Assistant credentials are required.

@@ -1,3 +1,8 @@
+mod rpc;
+#[allow(dead_code, unused_parens, clippy::all)]
+pub mod stufftracker_v1_capnp {
+    include!(concat!(env!("OUT_DIR"), "/stufftracker_v1_capnp.rs"));
+}
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, State},
@@ -7,6 +12,7 @@ use axum::{
 };
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::future::IntoFuture;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -91,19 +97,22 @@ fn rows<T: serde::de::DeserializeOwned>(db: &Connection, table: &str) -> Result<
     rows.map(|r| serde_json::from_str(&r.map_err(internal)?).map_err(internal))
         .collect()
 }
-async fn document(State(a): State<App>) -> Result<Json<Snapshot>, Error> {
+fn load_snapshot(a: &App) -> Result<Snapshot, Error> {
     let db = a.db.lock().map_err(internal)?;
     let revision = db
         .query_row("SELECT revision FROM meta WHERE id=1", [], |r| r.get(0))
         .map_err(internal)?;
-    Ok(Json(Snapshot {
+    Ok(Snapshot {
         revision,
         document: Document {
             entities: rows(&db, "entities")?,
             connections: rows(&db, "connections")?,
             layers: rows(&db, "layers")?,
         },
-    }))
+    })
+}
+async fn document(State(a): State<App>) -> Result<Json<Snapshot>, Error> {
+    load_snapshot(&a).map(Json)
 }
 async fn put_document(
     State(a): State<App>,
@@ -111,6 +120,10 @@ async fn put_document(
     Json(s): Json<Snapshot>,
 ) -> Result<Json<serde_json::Value>, Error> {
     require_write(&a, &h)?;
+    let revision = store_snapshot(&a, s)?;
+    Ok(Json(serde_json::json!({"revision":revision})))
+}
+fn store_snapshot(a: &App, s: Snapshot) -> Result<u64, Error> {
     stufftracker_core::validate(&s.document).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let mut db = a.db.lock().map_err(internal)?;
     let tx = db.transaction().map_err(internal)?;
@@ -127,9 +140,9 @@ async fn put_document(
     tx.execute("UPDATE meta SET revision=revision+1 WHERE id=1", [])
         .map_err(internal)?;
     tx.commit().map_err(internal)?;
-    Ok(Json(serde_json::json!({"revision":revision+1})))
+    Ok(revision + 1)
 }
-async fn views(State(a): State<App>) -> Result<Json<Vec<SavedView>>, Error> {
+fn load_views(a: &App) -> Result<Vec<SavedView>, Error> {
     let db = a.db.lock().map_err(internal)?;
     let mut q = db
         .prepare("SELECT id,name,data FROM views ORDER BY name")
@@ -152,7 +165,10 @@ async fn views(State(a): State<App>) -> Result<Json<Vec<SavedView>>, Error> {
             })
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    Ok(Json(result))
+    Ok(result)
+}
+async fn views(State(a): State<App>) -> Result<Json<Vec<SavedView>>, Error> {
+    load_views(&a).map(Json)
 }
 async fn save_view(
     State(a): State<App>,
@@ -160,6 +176,11 @@ async fn save_view(
     Json(v): Json<SavedView>,
 ) -> Result<StatusCode, Error> {
     require_write(&a, &h)?;
+    store_view(&a, v)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+fn store_view(a: &App, v: SavedView) -> Result<(), Error> {
+    stufftracker_core::validate_view(&v.view).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if v.name.trim().is_empty() || v.id.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -167,7 +188,7 @@ async fn save_view(
         ));
     }
     a.db.lock().map_err(internal)?.execute("INSERT INTO views VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET name=excluded.name,data=excluded.data",params![v.id,v.name,serde_json::to_string(&v.view).map_err(internal)?]).map_err(internal)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 async fn delete_view(
     State(a): State<App>,
@@ -175,11 +196,15 @@ async fn delete_view(
     Path(id): Path<String>,
 ) -> Result<StatusCode, Error> {
     require_write(&a, &h)?;
+    remove_view(&a, &id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+fn remove_view(a: &App, id: &str) -> Result<(), Error> {
     a.db.lock()
         .map_err(internal)?
         .execute("DELETE FROM views WHERE id=?1", [id])
         .map_err(internal)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 async fn layout(Json(r): Json<LayoutRequest>) -> Result<Json<stufftracker_core::Layout>, Error> {
     stufftracker_core::layout(&r)
@@ -222,10 +247,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = Connection::open(state.join("stufftracker.sqlite3"))?;
     initialize(&mut db)?;
     let socket = std::env::var("DARUDE_HTTP_SOCKET").ok();
-    let app = router(App {
+    let state = App {
         db: Arc::new(Mutex::new(db)),
-        grain: socket.is_some(),
-    });
+        grain: socket.is_some() || std::env::var_os("DARUDE_PLATFORM_SOCKET").is_some(),
+    };
+    if std::env::var_os("DARUDE_PLATFORM_SOCKET").is_some() && socket.is_none() {
+        return Err("DARUDE_PLATFORM_SOCKET requires DARUDE_HTTP_SOCKET".into());
+    }
+    let app = router(state.clone());
     if let Some(path) = socket {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -233,8 +262,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => return Err(e.into()),
         };
         let listener = tokio::net::UnixListener::bind(&path)?;
-        eprintln!("StuffTracker ready on {path}");
-        axum::serve(listener, app).await?;
+        eprintln!("StuffTracker HTTP bound on {path}");
+        if std::env::var_os("DARUDE_PLATFORM_SOCKET").is_some() {
+            let local = tokio::task::LocalSet::new();
+            local.run_until(async move {
+                tokio::select! {
+                    result = axum::serve(listener, app).into_future() => result.map_err(anyhow::Error::from),
+                    result = rpc::serve(state) => result,
+                }
+            }).await?;
+        } else {
+            axum::serve(listener, app).await?;
+        }
     } else {
         let address = std::env::var("STUFFTRACKER_BIND").unwrap_or("127.0.0.1:8090".into());
         let listener = tokio::net::TcpListener::bind(&address).await?;
