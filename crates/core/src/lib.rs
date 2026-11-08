@@ -580,6 +580,8 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
                 }
                 rows = rows.max(row_of(space) + 1.);
             }
+            // Split into segments, each shows only its own spaces.
+            let split = spans.len() > 1;
             for (i, (top_y, bottom_y, label)) in spans.into_iter().enumerate() {
                 let mut b = row_box(x, 0., 1., col, side);
                 b.y = top_y;
@@ -589,7 +591,9 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
                 b.position = label;
                 if i == 0 {
                     b.label = p.label.clone();
-                    b.position = p.spaces_label(2);
+                    if !split {
+                        b.position = p.spaces_label(2);
+                    }
                 }
                 ports.push(b);
             }
@@ -4511,7 +4515,7 @@ mod tests {
         // Quad outer pair: 1A and 3B are not adjacent, so two tied segments.
         let outer = boxes("1A/3B");
         assert_eq!(outer.len(), 2);
-        assert_eq!((outer[0].segment, outer[0].position.as_str()), (0, "1A/3B"));
+        assert_eq!((outer[0].segment, outer[0].position.as_str()), (0, "1A"));
         assert_eq!((outer[1].segment, outer[1].position.as_str()), (1, "3B"));
         assert_eq!(outer[0].y, first_row);
         // 3B: the lower half of the next row (space 3).
