@@ -329,11 +329,15 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
         : b.height >= parts.length * ROW - 6
           ? { pitch: ROW, first: 13, cls: "" }
           : b.height >= parts.length * 10
-            ? { pitch: 10, first: 9, cls: " tiny" }
+            ? {
+                pitch: 10,
+                first: b.height / 2 - ((parts.length - 1) * 10) / 2,
+                cls: " tiny mid",
+              }
             : null;
     if (!fit) {
       const small = b.height < 14;
-      return `<text class="slot-pos${small ? " tiny" : ""}" x="${x}" y="${b.y + (small ? 9 : 13)}"${anchor}>${esc(b.position || "·")}</text>`;
+      return `<text class="slot-pos${small ? " tiny mid" : ""}" x="${x}" y="${b.y + (small ? b.height / 2 : 13)}"${anchor}>${esc(b.position || "·")}</text>`;
     }
     return parts
       .map(
@@ -357,7 +361,7 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
       Math.floor((b.width - 44 - handleW - badgeW) / 6.2),
     );
     const small = b.height < 14;
-    return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/>${positions(b, posX, right)}<text class="slot-label ${small ? "tiny" : ""}" x="${labelX}" y="${b.y + (small ? 9 : 13)}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text>${handle(b, p)}${badge(b, p)}<title>${esc(title)}</title></g>`;
+    return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/>${positions(b, posX, right)}<text class="slot-label ${small ? "tiny mid" : ""}" x="${labelX}" y="${b.y + (small ? b.height / 2 : 13)}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text>${handle(b, p)}${badge(b, p)}<title>${esc(title)}</title></g>`;
   };
   const rating = (p?: Port) =>
     [
@@ -383,7 +387,7 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
         : b.x + b.width - 7;
       const right = panel && b.side === "right";
       const labelX = right ? b.x + HANDLE + 9 : b.x + 38;
-      body += `<g class="slot used tied"><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/>${positions(b, right ? b.x + b.width - 5 : b.x + 5, right)}<text class="slot-label tiny" x="${labelX}" y="${b.y + 9}">↑ ${esc(b.id)}</text>${handle(b, portOf(b.id))}</g>`;
+      body += `<g class="slot used tied"><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/>${positions(b, right ? b.x + b.width - 5 : b.x + 5, right)}<text class="slot-label tiny mid" x="${labelX}" y="${b.y + b.height / 2}">↑ ${esc(b.id)}</text>${handle(b, portOf(b.id))}</g>`;
       // Drawn last, over any breaker the tie crosses (a quad's inner pair).
       ties += `<path class="tie" d="M${x},${first.y + first.height / 2} V${b.y + b.height / 2}"><title>${esc(b.id)}: one linked breaker</title></path>`;
       continue;

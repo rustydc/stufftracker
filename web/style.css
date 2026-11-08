@@ -1042,3 +1042,13 @@ label.toggle {
   background: none;
   color: #a34b3b;
 }
+/* Half-height (tandem) slots: text centred in the box, not hung from the top. */
+.node.faceplate .mid {
+  dominant-baseline: central;
+}
+.node.faceplate .slot-pos.tiny {
+  font-size: 7.5px;
+}
+.node.faceplate .slot-label.tiny {
+  font-size: 7.5px;
+}
