@@ -324,9 +324,54 @@ function zoom(mult: number, x?: number, y?: number) {
   applyCamera();
 }
 let drag: { id: string | null; start: Point; origin: Point } | null = null;
+const pointers = new Map<number, Point>();
+let pinch: { distance: number; scale: number; world: Point } | null = null;
+function pointerPoint(ev: PointerEvent): Point {
+  const r = svg.getBoundingClientRect();
+  return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+}
+function pinchGeometry() {
+  const [a, b] = [...pointers.values()];
+  return {
+    center: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+    distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+  };
+}
+function startPinch() {
+  const { center, distance } = pinchGeometry();
+  drag = null;
+  pinch = {
+    distance,
+    scale: camera.scale,
+    world: {
+      x: (center.x - camera.x) / camera.scale,
+      y: (center.y - camera.y) / camera.scale,
+    },
+  };
+}
+function endPointer(ev: PointerEvent) {
+  if (!pointers.delete(ev.pointerId)) return;
+  if (pinch) {
+    if (pointers.size >= 2) startPinch();
+    else {
+      pinch = null;
+      const remaining = [...pointers.values()][0];
+      // After a pinch, the remaining finger pans; it never resumes a node drag.
+      drag = remaining
+        ? { id: null, start: remaining, origin: { x: camera.x, y: camera.y } }
+        : null;
+    }
+  } else drag = null;
+}
 svg.addEventListener("pointerdown", (ev) => {
   if (ev.button !== 0) return;
   ev.preventDefault();
+  pointers.set(ev.pointerId, pointerPoint(ev));
+  svg.setPointerCapture(ev.pointerId);
+  if (pointers.size >= 2) {
+    startPinch();
+    return;
+  }
   const target = ev.target as Element;
   const foldTarget = target.closest("[data-fold]");
   if (foldTarget) {
@@ -357,6 +402,19 @@ svg.addEventListener("pointerdown", (ev) => {
   svg.setPointerCapture(ev.pointerId);
 });
 svg.addEventListener("pointermove", (ev) => {
+  if (!pointers.has(ev.pointerId)) return;
+  pointers.set(ev.pointerId, pointerPoint(ev));
+  if (pinch) {
+    const { center, distance } = pinchGeometry();
+    camera.scale = Math.max(
+      0.15,
+      Math.min(2.5, (pinch.scale * distance) / pinch.distance),
+    );
+    camera.x = center.x - pinch.world.x * camera.scale;
+    camera.y = center.y - pinch.world.y * camera.scale;
+    applyCamera();
+    return;
+  }
   if (!drag) return;
   const r = svg.getBoundingClientRect();
   const dx = ev.clientX - r.left - drag.start.x,
@@ -383,12 +441,9 @@ svg.addEventListener("pointermove", (ev) => {
     applyCamera();
   }
 });
-svg.addEventListener("pointerup", () => {
-  drag = null;
-});
-svg.addEventListener("pointercancel", () => {
-  drag = null;
-});
+svg.addEventListener("pointerup", endPointer);
+svg.addEventListener("pointercancel", endPointer);
+svg.addEventListener("lostpointercapture", endPointer);
 svg.addEventListener("dblclick", (ev) => {
   const id = (ev.target as Element)
     .closest("[data-id]")

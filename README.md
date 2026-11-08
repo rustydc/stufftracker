@@ -200,3 +200,7 @@ Routing retains per-connection attachment hints in saved views and offline expor
 Previous device ports and space gateways receive a hysteresis preference during
 dragging, so nearly equal paths do not repeatedly swap attachment sides or slots.
 Obstacle clearance and wire spacing remain hard constraints.
+
+Mobile canvas gestures support two-finger pinch zoom and pan around the moving
+finger midpoint. Lifting one finger continues panning without resuming a node drag.
+Run `npm run test:mobile` for touch-input checks against the server and offline export.
