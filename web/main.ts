@@ -1,5 +1,6 @@
 import init, { compute, move_node } from "./pkg/stufftracker_core";
 declare const WASM_BASE64: string;
+declare const WORKER_SOURCE: string;
 type Point = { x: number; y: number };
 type Entity = {
   id: string;
@@ -94,7 +95,10 @@ function run(fn: () => unknown | Promise<unknown>) {
   };
 }
 function computeLayout() {
-  current = JSON.parse(compute(JSON.stringify({ document: doc, view })));
+  applyLayout(JSON.parse(compute(JSON.stringify({ document: doc, view }))));
+}
+function applyLayout(layout: Layout) {
+  current = layout;
   view.attachment_hints = current.attachment_hints;
   view.positions = current.positions;
   view.layout_version = current.layout_version;
@@ -324,6 +328,104 @@ function zoom(mult: number, x?: number, y?: number) {
   applyCamera();
 }
 let drag: { id: string | null; start: Point; origin: Point } | null = null;
+// Pointer events arrive far faster than a move + relayout completes on a
+// real inventory. Only the latest target position matters: `latestMove` is
+// overwritten on every pointermove and `moveSeq` counts them, while
+// `appliedSeq` is the newest move the view reflects. Layout runs in a worker
+// when one is available (one request in flight, always for the newest
+// position) so the page keeps panning and painting; otherwise it runs on this
+// thread at most once per animation frame.
+let latestMove: { id: string; position: Point } | null = null;
+let moveSeq = 0,
+  appliedSeq = 0,
+  moveFrame = 0;
+let layoutWorker: Worker | null = null,
+  workerBusy = false,
+  // Bumped whenever this thread applies a move itself; any worker reply
+  // computed against an older view is then discarded.
+  workerGeneration = 0;
+function requestMove(move: { id: string; position: Point }) {
+  latestMove = move;
+  moveSeq++;
+  if (layoutWorker) {
+    if (!workerBusy) postMove();
+  } else if (!moveFrame) moveFrame = requestAnimationFrame(settleDrag);
+}
+function postMove() {
+  if (!layoutWorker || !latestMove || appliedSeq === moveSeq) return;
+  workerBusy = true;
+  layoutWorker.postMessage({
+    generation: workerGeneration,
+    seq: moveSeq,
+    document: JSON.stringify(doc),
+    view: JSON.stringify(view),
+    entity: latestMove.id,
+    position: latestMove.position,
+  });
+}
+// Bring the view up to the newest move synchronously. Runs per frame without
+// a worker, and with one whenever something else is about to touch the view
+// before the worker has delivered the final position.
+function settleDrag() {
+  if (moveFrame) cancelAnimationFrame(moveFrame);
+  moveFrame = 0;
+  if (!latestMove || appliedSeq === moveSeq) return;
+  workerGeneration++;
+  view = JSON.parse(
+    move_node(
+      JSON.stringify({
+        document: doc,
+        view,
+        entity: latestMove.id,
+        position: latestMove.position,
+      }),
+    ),
+  );
+  appliedSeq = moveSeq;
+  computeLayout();
+  renderScene();
+}
+function startLayoutWorker(module: WebAssembly.Module) {
+  let worker: Worker;
+  try {
+    const url = URL.createObjectURL(
+      new Blob([WORKER_SOURCE], { type: "text/javascript" }),
+    );
+    worker = new Worker(url);
+    URL.revokeObjectURL(url);
+    worker.postMessage({ module });
+  } catch {
+    return; // e.g. a sandboxed export; stay on the per-frame path
+  }
+  const fallBack = () => {
+    worker.terminate();
+    layoutWorker = null;
+    workerBusy = false;
+    settleDrag();
+  };
+  worker.onerror = fallBack;
+  worker.onmessage = (ev) => {
+    workerBusy = false;
+    const r = ev.data;
+    if (r.error) {
+      status(`Layout worker failed, laying out in page: ${r.error}`, true);
+      fallBack();
+      return;
+    }
+    if (r.generation === workerGeneration && r.seq > appliedSeq) {
+      view = JSON.parse(r.view);
+      appliedSeq = r.seq;
+      applyLayout(JSON.parse(r.layout));
+      renderScene();
+    }
+    postMove();
+  };
+  layoutWorker = worker;
+}
+// Any new interaction first lands an in-flight drag, so handlers always see
+// (and build on) the view the user last saw the node dropped into.
+document.addEventListener("pointerdown", () => settleDrag(), true);
+document.addEventListener("keydown", () => settleDrag(), true);
 const pointers = new Map<number, Point>();
 let pinch: { distance: number; scale: number; world: Point } | null = null;
 function pointerPoint(ev: PointerEvent): Point {
@@ -351,6 +453,8 @@ function startPinch() {
 }
 function endPointer(ev: PointerEvent) {
   if (!pointers.delete(ev.pointerId)) return;
+  // Land the drag where the pointer let go (the worker delivers it itself).
+  if (!layoutWorker) settleDrag();
   if (pinch) {
     if (pointers.size >= 2) startPinch();
     else {
@@ -420,21 +524,13 @@ svg.addEventListener("pointermove", (ev) => {
   const dx = ev.clientX - r.left - drag.start.x,
     dy = ev.clientY - r.top - drag.start.y;
   if (drag.id) {
-    view = JSON.parse(
-      move_node(
-        JSON.stringify({
-          document: doc,
-          view,
-          entity: drag.id,
-          position: {
-            x: drag.origin.x + dx / camera.scale,
-            y: drag.origin.y + dy / camera.scale,
-          },
-        }),
-      ),
-    );
-    computeLayout();
-    renderScene();
+    requestMove({
+      id: drag.id,
+      position: {
+        x: drag.origin.x + dx / camera.scale,
+        y: drag.origin.y + dy / camera.scale,
+      },
+    });
   } else {
     camera.x = drag.origin.x + dx;
     camera.y = drag.origin.y + dy;
@@ -591,9 +687,11 @@ window.addEventListener("beforeunload", (ev) => {
   }
 });
 async function start() {
-  await init({
-    module_or_path: Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0)),
-  });
+  const module = await WebAssembly.compile(
+    Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0)),
+  );
+  await init({ module_or_path: module });
+  startLayoutWorker(module);
   const snapshot = JSON.parse($("snapshot").textContent || "null");
   if (snapshot) {
     offline = true;

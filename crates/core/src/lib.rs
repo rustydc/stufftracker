@@ -442,6 +442,8 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
             tracks: &reserved,
             preferences: BTreeMap::new(),
             attachments: BTreeMap::new(),
+            routes: Default::default(),
+            obstacle_sets: Default::default(),
         };
         let hint_prefix = format!("{}|", serde_json::to_string(&connections).unwrap());
         router.attachments = view
@@ -555,7 +557,18 @@ struct HierarchyRouter<'a> {
     tracks: &'a [Track],
     preferences: BTreeMap<String, Vec<f64>>,
     attachments: BTreeMap<String, Point>,
+    /// Segments already routed by this router. A router's inputs are fixed
+    /// for its lifetime — the reserved tracks are borrowed immutably, and
+    /// lane preferences only change in `plan_corridors`, which clears this —
+    /// so a segment is a pure function of (start, end, domain). Junction
+    /// candidates and port alternatives ask for the same segments many
+    /// times; this answers the repeats without re-running the search.
+    routes: std::cell::RefCell<std::collections::HashMap<RouteKey, Vec<Point>>>,
+    /// Each domain's obstacle boxes (its immediate children), built once:
+    /// the nodes are fixed for the router's lifetime.
+    obstacle_sets: std::cell::RefCell<std::collections::HashMap<Option<String>, Vec<Rect>>>,
 }
+type RouteKey = ([u64; 4], Option<String>);
 /// Centerline separation between independent parallel runs. With a 2-unit
 /// stroke this leaves 8 units of visible padding. Opposing flows share the same
 /// geometric rule; deliberately bundled branches are reserved as one connection.
@@ -888,6 +901,7 @@ impl HierarchyRouter<'_> {
             });
         self.preferences
             .insert(common.unwrap_or("").into(), selected.lanes.clone());
+        self.routes.get_mut().clear();
         let spaces: BTreeSet<_> = eps
             .iter()
             .flat_map(|(id, _)| {
@@ -910,6 +924,7 @@ impl HierarchyRouter<'_> {
                 .min_by(|a, b| (a.center - goal).abs().total_cmp(&(b.center - goal).abs()))
             {
                 self.preferences.insert(id, pool.lanes.clone());
+                self.routes.get_mut().clear();
             }
         }
     }
@@ -1017,9 +1032,14 @@ impl HierarchyRouter<'_> {
         })
     }
     fn obstacles(&self, domain: Option<&str>) -> Vec<Rect> {
+        let key = domain.map(str::to_owned);
+        if let Some(hit) = self.obstacle_sets.borrow().get(&key) {
+            return hit.clone();
+        }
         // The immediate child boxes include every nested space in full. Routes
         // within a room see its device boxes; floor routes see solid room boxes.
-        self.nodes
+        let set: Vec<Rect> = self
+            .nodes
             .iter()
             .filter(|n| self.parent(&n.id) == domain)
             .map(|n| Rect {
@@ -1027,7 +1047,9 @@ impl HierarchyRouter<'_> {
                 width: n.width,
                 height: n.height,
             })
-            .collect()
+            .collect();
+        self.obstacle_sets.borrow_mut().insert(key, set.clone());
+        set
     }
     fn bundle(&self, eps: &[(String, Role)], common: Option<&str>, channel: usize) -> Vec<Branch> {
         let centers: Vec<_> = eps.iter().map(|(id, _)| self.center(id)).collect();
@@ -1046,6 +1068,8 @@ impl HierarchyRouter<'_> {
                 tracks: self.tracks,
                 preferences: BTreeMap::new(),
                 attachments: self.attachments.clone(),
+                routes: Default::default(),
+                obstacle_sets: Default::default(),
             };
             for point in fallback.junction_options(common, &centers, channel) {
                 let branches = fallback.via_junction(eps, common, point);
@@ -1331,14 +1355,28 @@ impl HierarchyRouter<'_> {
         best.map(|(_, gate)| gate)
     }
     fn segment(&self, start: Point, end: Point, domain: Option<&str>) -> Vec<Point> {
-        route(
+        let key = (
+            [
+                start.x.to_bits(),
+                start.y.to_bits(),
+                end.x.to_bits(),
+                end.y.to_bits(),
+            ],
+            domain.map(str::to_owned),
+        );
+        if let Some(hit) = self.routes.borrow().get(&key) {
+            return hit.clone();
+        }
+        let path = route(
             start,
             end,
             &self.obstacles(domain),
             self.bounds(domain),
             self.tracks,
             self.preferred(domain),
-        )
+        );
+        self.routes.borrow_mut().insert(key, path.clone());
+        path
     }
     fn branch(
         &self,
@@ -2205,14 +2243,91 @@ fn route(
     };
     let s = index(start);
     let t = index(end);
+    // The edge test is the search's inner loop: every relaxation checks a
+    // grid edge against every obstacle and track. Only obstacles whose padded
+    // span covers a row (column) can block a horizontal (vertical) edge in it,
+    // and only same-orientation tracks within spacing can conflict, so gather
+    // those per row and per column once; each edge's verdict is the same
+    // `blocked` / `track_conflict` test run on that short list, memoized
+    // (an edge is reached from several direction states).
+    let row_rects: Vec<Vec<Rect>> = ys
+        .iter()
+        .map(|&y| {
+            rects
+                .iter()
+                .filter(|r| y > r.position.y - 8. && y < r.position.y + r.height + 8.)
+                .copied()
+                .collect()
+        })
+        .collect();
+    let col_rects: Vec<Vec<Rect>> = xs
+        .iter()
+        .map(|&x| {
+            rects
+                .iter()
+                .filter(|r| x > r.position.x - 8. && x < r.position.x + r.width + 8.)
+                .copied()
+                .collect()
+        })
+        .collect();
+    let row_tracks: Vec<Vec<Track>> = ys
+        .iter()
+        .map(|&y| {
+            tracks
+                .iter()
+                .filter(|t| t.horizontal() && (y - t.a.y).abs() < TRACK_SPACING - 1e-6)
+                .copied()
+                .collect()
+        })
+        .collect();
+    let col_tracks: Vec<Vec<Track>> = xs
+        .iter()
+        .map(|&x| {
+            tracks
+                .iter()
+                .filter(|t| !t.horizontal() && (x - t.a.x).abs() < TRACK_SPACING - 1e-6)
+                .copied()
+                .collect()
+        })
+        .collect();
+    // 0 = not yet tested, 1 = open, 2 = closed; indexed by the edge's
+    // lower-indexed cell and its axis.
+    let mut edge_state = vec![0u8; w * h * 2];
+    let mut edge_open = |i: usize, j: usize, axis: usize| -> bool {
+        let k = i.min(j) * 2 + axis - 1;
+        if edge_state[k] == 0 {
+            let (a, b) = (point(i), point(j));
+            let (rs, ts) = if axis == 1 {
+                (&row_rects[i / w], &row_tracks[i / w])
+            } else {
+                (&col_rects[i % w], &col_tracks[i % w])
+            };
+            edge_state[k] = if blocked(a, b, rs) || track_conflict(a, b, ts) {
+                2
+            } else {
+                1
+            };
+        }
+        edge_state[k] == 1
+    };
     let mut dist = vec![u64::MAX; w * h * 3];
     let mut prev = vec![usize::MAX; dist.len()];
     let mut heap = BinaryHeap::new();
+    // A*: order by cost-so-far plus a lower bound on the rest. Every step
+    // costs at least 1000x its length minus 0.5 (rounding), so Manhattan
+    // distance x1000, less 0.5 per grid cell a path could visit, never
+    // overestimates — the first time `end` is reached its cost is optimal.
+    let slack = (w * h) as u64 / 2 + 1;
+    let estimate = |i: usize| -> u64 {
+        let p = point(i);
+        ((((p.x - end.x).abs() + (p.y - end.y).abs()) * 1000.).floor() as u64).saturating_sub(slack)
+    };
     dist[s * 3] = 0;
-    heap.push(std::cmp::Reverse((0u64, s * 3)));
+    heap.push(std::cmp::Reverse((estimate(s), s * 3)));
     let mut finish = None;
-    while let Some(std::cmp::Reverse((cost, state))) = heap.pop() {
-        if dist[state] != cost {
+    while let Some(std::cmp::Reverse((f, state))) = heap.pop() {
+        let cost = dist[state];
+        if cost.saturating_add(estimate(state / 3)) != f {
             continue;
         }
         let i = state / 3;
@@ -2221,25 +2336,18 @@ fn route(
             finish = Some(state);
             break;
         }
-        let mut neighbors = Vec::new();
-        if i % w > 0 {
-            neighbors.push((i - 1, 1));
-        }
-        if i % w + 1 < w {
-            neighbors.push((i + 1, 1));
-        }
-        if i >= w {
-            neighbors.push((i - w, 2));
-        }
-        if i + w < w * h {
-            neighbors.push((i + w, 2));
-        }
-        for (j, d) in neighbors {
-            let a = point(i);
-            let b = point(j);
-            if blocked(a, b, rects) || track_conflict(a, b, tracks) {
+        let neighbors = [
+            (i % w > 0).then(|| (i.wrapping_sub(1), 1)),
+            (i % w + 1 < w).then_some((i + 1, 1)),
+            (i >= w).then(|| (i.wrapping_sub(w), 2)),
+            (i + w < w * h).then_some((i + w, 2)),
+        ];
+        for (j, d) in neighbors.into_iter().flatten() {
+            if !edge_open(i, j, d) {
                 continue;
             }
+            let a = point(i);
+            let b = point(j);
             let c = cost
                 + ((distance(a, b) + vertical_affinity(a, b, preferred)) * 1000.).round() as u64
                 + if dir != 0 && dir != d { 28000 } else { 0 };
@@ -2247,7 +2355,7 @@ fn route(
             if c < dist[next] {
                 dist[next] = c;
                 prev[next] = state;
-                heap.push(std::cmp::Reverse((c, next)));
+                heap.push(std::cmp::Reverse((c + estimate(j), next)));
             }
         }
     }
@@ -2387,6 +2495,8 @@ mod tests {
                     tracks: &[],
                     preferences: BTreeMap::new(),
                     attachments: BTreeMap::new(),
+                    routes: Default::default(),
+                    obstacle_sets: Default::default(),
                 };
                 router.plan_corridors(
                     Some("ground"),
@@ -2502,6 +2612,8 @@ mod tests {
             tracks: &[],
             preferences: BTreeMap::new(),
             attachments: BTreeMap::new(),
+            routes: Default::default(),
+            obstacle_sets: Default::default(),
         };
         let make = |id: &str, points: &[(f64, f64)]| Branch {
             entity: id.into(),
@@ -2608,6 +2720,8 @@ mod tests {
             tracks: &[],
             preferences: BTreeMap::new(),
             attachments: BTreeMap::new(),
+            routes: Default::default(),
+            obstacle_sets: Default::default(),
         };
         let path = router.straighten(&branch, Some("house"), &BTreeMap::new(), &[]);
         assert_eq!(
@@ -2647,6 +2761,8 @@ mod tests {
             tracks: &tracks,
             preferences: BTreeMap::new(),
             attachments: BTreeMap::new(),
+            routes: Default::default(),
+            obstacle_sets: Default::default(),
         };
         let path = router.straighten(&branch, Some("house"), &BTreeMap::new(), &[]);
         assert!(path.len() > 3 && path.len() < branch.points.len());
@@ -2664,6 +2780,8 @@ mod tests {
             tracks: &[],
             preferences: BTreeMap::new(),
             attachments: BTreeMap::new(),
+            routes: Default::default(),
+            obstacle_sets: Default::default(),
         };
         let office = router.node("office");
         let gate = Point {
@@ -3050,6 +3168,8 @@ mod tests {
                 tracks: &[],
                 preferences: BTreeMap::new(),
                 attachments: BTreeMap::new(),
+                routes: Default::default(),
+                obstacle_sets: Default::default(),
             };
             for bundle in &result.bundles {
                 for branch in &bundle.branches {
