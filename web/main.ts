@@ -344,9 +344,15 @@ let layoutWorker: Worker | null = null,
   // Bumped whenever this thread applies a move itself; any worker reply
   // computed against an older view is then discarded.
   workerGeneration = 0;
+// `data-layout-pending` marks the gap between a drag position and the layout
+// that reflects it, so automation can wait for the settled scene.
+function markSettled() {
+  if (appliedSeq === moveSeq) delete svg.dataset.layoutPending;
+}
 function requestMove(move: { id: string; position: Point }) {
   latestMove = move;
   moveSeq++;
+  svg.dataset.layoutPending = "";
   if (layoutWorker) {
     if (!workerBusy) postMove();
   } else if (!moveFrame) moveFrame = requestAnimationFrame(settleDrag);
@@ -382,6 +388,7 @@ function settleDrag() {
     ),
   );
   appliedSeq = moveSeq;
+  markSettled();
   computeLayout();
   renderScene();
 }
@@ -415,6 +422,7 @@ function startLayoutWorker(module: WebAssembly.Module) {
     if (r.generation === workerGeneration && r.seq > appliedSeq) {
       view = JSON.parse(r.view);
       appliedSeq = r.seq;
+      markSettled();
       applyLayout(JSON.parse(r.layout));
       renderScene();
     }

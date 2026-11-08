@@ -13,6 +13,11 @@ const page = await browser.newPage({
 });
 const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
+// Drag layout may finish in a worker after pointerup; wait for it to land.
+const settled = (p) =>
+  p.waitForFunction(
+    () => !("layoutPending" in document.querySelector("#graph").dataset),
+  );
 const base = process.env.STUFFTRACKER_URL || "http://127.0.0.1:8090/";
 mkdirSync("work", { recursive: true });
 try {
@@ -74,6 +79,7 @@ try {
     steps: 3,
   });
   await page.mouse.up();
+  await settled(page);
   assert.equal(
     await page.evaluate(() => window.getSelection()?.toString()),
     "",
@@ -114,6 +120,7 @@ try {
   await page.mouse.down();
   await page.mouse.move(box.x + 65, box.y + 45, { steps: 4 });
   await page.mouse.up();
+  await settled(page);
   const moved = await transforms();
   assert.notEqual(moved.lamp, before.lamp);
   for (const id of Object.keys(before))
@@ -335,6 +342,7 @@ try {
     steps: 2,
   });
   await exported.mouse.up();
+  await settled(exported);
   assert.notEqual(
     await exported.locator('.space[data-id="house"]').getAttribute("transform"),
     oldRoot,
