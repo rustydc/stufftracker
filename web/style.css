@@ -939,3 +939,15 @@ label.toggle {
   color: #fff;
   border-color: #2f6b4d;
 }
+.node.faceplate .tie {
+  stroke: #7fa577;
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+.node.faceplate .slot.tied rect {
+  fill: #eaf2e4;
+  stroke: #9fbe95;
+}
+.port-rows td:nth-child(4) {
+  width: 44px;
+}

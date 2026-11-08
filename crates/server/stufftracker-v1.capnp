@@ -67,8 +67,12 @@ struct Port {
   position @2 :UInt32;
   # Spaces covered: 1, 2 or 3 (0 means 1). A 240 V breaker is 2.
   poles @3 :UInt8;
-  # "A" or "B" for one half of a tandem breaker sharing its space; empty otherwise.
+  # "A" or "B" for one half of a tandem breaker sharing its space; empty otherwise. For a linked breaker that changes half between spaces, use halves instead.
   half @4 :Text;
+  # One entry per pole, the half of each space it covers: "A", "B", or "" for the whole space. A quad's outer pair at 1 is ["A","B"] (1A/3B), its inner pair ["B","A"] (1B/3A); a 7B to 9A linked pair is ["B","A"] at 7. Empty unless needed; leave half empty when set.
+  halves @5 :List(Text);
+  # The supply: a panel's main breaker or main lugs, a switch's uplink, a controller's line input. Drawn in a row above the numbered positions, where an incoming feed's endpoint should land. Takes no position; a back-fed main in branch spaces is an ordinary breaker. A panel may have several (utility and generator inputs).
+  main @6 :Bool;
 }
 struct ExternalLink {
   provider @0 :Text;

@@ -9,6 +9,10 @@ type Port = {
   position?: number;
   poles?: number;
   half?: "A" | "B";
+  /** Per pole: "A", "B" or "" (whole space), for linked half-space breakers. */
+  halves?: string[];
+  /** The supply (main breaker, main lugs, uplink), drawn above the positions. */
+  main?: boolean;
 };
 type Entity = {
   id: string;
@@ -38,6 +42,8 @@ type PortBox = {
   width: number;
   height: number;
   side: "left" | "right" | "either";
+  /** A linked breaker's later, tied segment (its first is 0 / absent). */
+  segment?: number;
 };
 type DocumentData = {
   entities: Entity[];
@@ -279,10 +285,21 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
     const small = b.height < 14;
     return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/><text class="slot-pos" x="${b.x + 5}" y="${b.y + (small ? 9 : 13)}">${esc(b.position || "·")}</text><text class="slot-label ${small ? "tiny" : ""}" x="${b.x + 38}" y="${b.y + (small ? 9 : 13)}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text><title>${esc(title)}</title></g>`;
   };
-  let body = "";
+  let body = "",
+    ties = "";
   for (const b of f.empty)
     body += slot(b, "empty", `Space ${b.position}: empty`);
   for (const b of f.ports) {
+    if (b.segment) {
+      // A linked breaker's later space: tie it to the first, like the
+      // handle tie on the breaker itself.
+      const first = f.ports.find((p) => p.id === b.id && !p.segment)!;
+      const x = b.x + b.width - 7;
+      body += `<g class="slot used tied"><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/><text class="slot-pos" x="${b.x + 5}" y="${b.y + 9}">${esc(b.position)}</text><text class="slot-label tiny" x="${b.x + 38}" y="${b.y + 9}">↑ ${esc(b.id)}</text></g>`;
+      // Drawn last, over any breaker the tie crosses (a quad's inner pair).
+      ties += `<path class="tie" d="M${x},${first.y + first.height / 2} V${b.y + b.height / 2}"><title>${esc(b.id)}: one linked breaker</title></path>`;
+      continue;
+    }
     const names = fed(b.id);
     body += slot(
       b,
@@ -296,6 +313,7 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
       "unassigned",
       "Connections not yet assigned to a port",
     );
+  body += ties;
   const kindLabel = {
     panel: "PANEL",
     switch: "SWITCH",
@@ -326,18 +344,23 @@ function renderLayers() {
     .join("");
 }
 const portOrder = (a: Port, b: Port) =>
+  Number(!!b.main) - Number(!!a.main) ||
   (a.position ?? 1e9) - (b.position ?? 1e9) ||
-  (a.half || "").localeCompare(b.half || "") ||
+  (a.halves?.[0] || a.half || "").localeCompare(
+    b.halves?.[0] || b.half || "",
+  ) ||
   a.id.localeCompare(b.id, undefined, { numeric: true });
 function spaces(e: Entity, p: Port) {
+  if (p.main) return "Main";
   if (!p.position) return "";
   const step = e.faceplate === "panel" ? 2 : 1;
-  return (
-    Array.from(
-      { length: Math.max(1, p.poles || 1) },
-      (_, k) => p.position! + k * step,
-    ).join("/") + (p.half || "")
+  const list = Array.from(
+    { length: Math.max(1, p.poles || 1) },
+    (_, k) => p.position! + k * step,
   );
+  return p.halves?.length
+    ? list.map((n, k) => `${n}${p.halves![k] || ""}`).join("/")
+    : list.join("/") + (p.half || "");
 }
 // What each port of `e` connects to: its schedule, plus the connections not
 // yet assigned to a port.
@@ -420,10 +443,10 @@ function portEditorHtml(e: Entity) {
     ? draft.ports
     : (e.ports || []).map((p) => ({ ...p, orig: p.id }));
   const faceplate = draft ? draft.faceplate : e.faceplate;
-  return `<details class="port-editor" ${portEditorOpen ? "open" : ""}><summary>Physical layout &amp; ports</summary><form id="ports-form"><label class="field">Layout<select name="faceplate"><option value="">None</option>${(["panel", "switch", "terminals"] as const).map((k) => `<option value="${k}" ${faceplate === k ? "selected" : ""}>${{ panel: "Breaker panel", switch: "Network switch", terminals: "Terminal strip" }[k]}</option>`).join("")}</select></label><table class="port-rows"><thead><tr><th>ID</th><th title="Starting space or port number">Pos</th><th title="Spaces covered (2 for a 240 V breaker)">Poles</th><th title="Tandem half">½</th><th>Label</th><th></th></tr></thead><tbody>${ports
+  return `<details class="port-editor" ${portEditorOpen ? "open" : ""}><summary>Physical layout &amp; ports</summary><form id="ports-form"><label class="field">Layout<select name="faceplate"><option value="">None</option>${(["panel", "switch", "terminals"] as const).map((k) => `<option value="${k}" ${faceplate === k ? "selected" : ""}>${{ panel: "Breaker panel", switch: "Network switch", terminals: "Terminal strip" }[k]}</option>`).join("")}</select></label><table class="port-rows"><thead><tr><th>ID</th><th title="Starting space or port number, or main">Pos</th><th title="Spaces covered (2 for a 240 V breaker)">Poles</th><th title="Tandem half: A or B, or one per space (B/A)">½</th><th>Label</th><th></th></tr></thead><tbody>${ports
     .map(
       (p, i) =>
-        `<tr data-row="${i}" ${p.orig ? `data-orig="${esc(p.orig)}"` : ""}><td><input name="id" value="${esc(p.id)}" required maxlength="40"></td><td><input name="position" type="number" min="1" max="999" value="${p.position ?? ""}"></td><td><select name="poles">${[1, 2, 3].map((n) => `<option ${(p.poles || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select></td><td><select name="half"><option value=""></option><option ${p.half === "A" ? "selected" : ""}>A</option><option ${p.half === "B" ? "selected" : ""}>B</option></select></td><td><input name="label" value="${esc(p.label || "")}" maxlength="200"></td><td><button type="button" class="remove-port" aria-label="Remove port ${esc(p.id)}">✕</button></td></tr>`,
+        `<tr data-row="${i}" ${p.orig ? `data-orig="${esc(p.orig)}"` : ""}><td><input name="id" value="${esc(p.id)}" required maxlength="40"></td><td><input name="position" inputmode="numeric" pattern="[0-9]{1,3}|[Mm][Aa][Ii][Nn]" placeholder="#" title="Starting space or port number, or main for the supply" value="${p.main ? "main" : (p.position ?? "")}"></td><td><select name="poles">${[1, 2, 3].map((n) => `<option ${(p.poles || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select></td><td><input name="half" pattern="[ABab]|([ABab-]/)+[ABab-]" title="A or B for a tandem half; one per space for a linked breaker, e.g. B/A (- for a whole space)" value="${esc(p.halves?.length ? p.halves.map((h) => h || "-").join("/") : p.half || "")}"></td><td><input name="label" value="${esc(p.label || "")}" maxlength="200"></td><td><button type="button" class="remove-port" aria-label="Remove port ${esc(p.id)}">✕</button></td></tr>`,
     )
     .join(
       "",
@@ -559,9 +582,13 @@ function renderInspector() {
             orig: tr.dataset.orig,
           };
           if (v("label")) p.label = v("label");
-          if (v("position")) p.position = Number(v("position"));
+          if (/^main$/i.test(v("position"))) p.main = true;
+          else if (v("position")) p.position = Number(v("position"));
           if (Number(v("poles")) > 1) p.poles = Number(v("poles"));
-          if (v("half")) p.half = v("half") as "A" | "B";
+          const half = v("half").toUpperCase();
+          if (half.includes("/"))
+            p.halves = half.split("/").map((h) => (h === "-" ? "" : h));
+          else if (half) p.half = half as "A" | "B";
           return p;
         },
       );

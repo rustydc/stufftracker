@@ -49,7 +49,12 @@ automation. Subsequent boots preserve your data.
   at a time or numbered in bulk, and give each an ID, starting position, pole
   count, tandem half (A/B) and label. Panels number spaces odd down the left
   and even down the right; a breaker of N poles covers position, position+2, …
-  on its side (a 240 V breaker is 2), and tandem halves share one space.
+  on its side (a 240 V breaker is 2), and tandem halves share one space. A
+  linked breaker that changes half between spaces takes one half per space
+  (type `B/A` for 7B/9A; a quad is 1A/3B plus 1B/3A), and non-adjacent spaces
+  are drawn tied together. Type `main` as the position for a supply (main
+  breaker, main lugs, uplink): it gets its own row on top, where incoming
+  feeds land.
   Connections are assigned a port from the inspector's connection list. The
   inspector shows the port schedule (printable), and **Show physical layout**
   draws the thing as its faceplate, with each wire leaving from its own port

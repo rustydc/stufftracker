@@ -82,6 +82,12 @@ fn ports_read(list: capnp::struct_list::Reader<'_, wire::port::Owned>) -> capnp:
                 position: Some(p.get_position()).filter(|v| *v > 0),
                 poles: Some(p.get_poles() as u32).filter(|v| *v > 1),
                 half: Some(half).filter(|h| !h.is_empty()),
+                halves: p
+                    .get_halves()?
+                    .iter()
+                    .map(text)
+                    .collect::<capnp::Result<_>>()?,
+                main: p.get_main(),
             })
         })
         .collect()
@@ -94,6 +100,11 @@ fn ports_write(mut list: capnp::struct_list::Builder<'_, wire::port::Owned>, por
         b.set_position(p.position.unwrap_or(0));
         b.set_poles(p.poles.unwrap_or(1).min(255) as u8);
         b.set_half(p.half.as_deref().unwrap_or(""));
+        b.set_main(p.main);
+        let mut halves = b.init_halves(p.halves.len() as u32);
+        for (k, h) in p.halves.iter().enumerate() {
+            halves.set(k as u32, h);
+        }
     }
 }
 fn entity_write(mut b: wire::entity::Builder<'_>, e: &Entity) {
@@ -709,6 +720,8 @@ mod tests {
                 position: Some(1),
                 poles: None,
                 half: None,
+                halves: Vec::new(),
+                main: false,
             },
             Port {
                 id: "3/5".into(),
@@ -716,13 +729,24 @@ mod tests {
                 position: Some(3),
                 poles: Some(2),
                 half: None,
+                halves: vec!["B".into(), "A".into()],
+                main: false,
+            },
+            Port {
+                id: "MAIN".into(),
+                label: "100 A main".into(),
+                position: None,
+                poles: Some(2),
+                half: None,
+                halves: Vec::new(),
+                main: true,
             },
         ];
         let mut req = c.put_ports_request();
         req.get().set_expected_revision(1);
         req.get().set_entity("panel");
         req.get().set_faceplate(wire::Faceplate::Panel);
-        ports_write(req.get().init_ports(2), &ports);
+        ports_write(req.get().init_ports(ports.len() as u32), &ports);
         let r = req.send().promise.await.unwrap();
         assert_eq!(revision(Ok(r.get().unwrap().get_revision())), 2);
         // putEntity (which carries no ports) renames without dropping them.
@@ -758,7 +782,7 @@ mod tests {
         let doc = c.get_document_request().send().promise.await.unwrap();
         let doc = document_read(doc.get().unwrap().get_document().unwrap()).unwrap();
         let panel = doc.entities.iter().find(|e| e.id == "panel").unwrap();
-        assert_eq!((panel.name.as_str(), panel.ports.len()), ("Main panel", 2));
+        assert_eq!((panel.name.as_str(), panel.ports.len()), ("Main panel", 3));
         let c2 = doc.connections.iter().find(|x| x.id == circuit.id).unwrap();
         assert_eq!(
             c2.endpoints

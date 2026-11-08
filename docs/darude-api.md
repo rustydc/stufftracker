@@ -115,7 +115,15 @@ faceplate, so renaming a panel never drops its breakers. Change them with
       "position": 6,
       "poles": 1,
       "half": "B"
-    }
+    },
+    {
+      "id": "7B/9A",
+      "label": "20 A baseboard",
+      "position": 7,
+      "poles": 2,
+      "halves": ["B", "A"]
+    },
+    { "id": "MAIN", "label": "100 A main lugs", "main": true }
   ]
 }
 ```
@@ -128,6 +136,18 @@ faceplate, so renaming a panel never drops its breakers. Change them with
   breaker at 3 covers 3 and 5.
 - `half` is `A` or `B` for one half of a tandem (twin) breaker; two halves may
   share a space, nothing else may.
+- `halves` gives the half of each space instead, one entry per pole (`A`, `B`,
+  or `""` for the whole space), for linked breakers that change half between
+  spaces. A quad breaker at 1 is two ports: the outer pair `["A", "B"]` (1A/3B)
+  and the inner pair `["B", "A"]` (1B/3A); a 7B-to-9A linked pair is
+  `["B", "A"]` at 7. Leave `half` empty when `halves` is set. A breaker whose
+  spaces are not adjacent (the outer pair) is drawn as tied segments.
+- `main` marks the supply: a panel's main breaker or main lugs, a switch's
+  uplink, a controller's line input. It takes no `position` and is drawn in a
+  row above the numbered positions. Point an incoming feed's target endpoint
+  at it (a subpanel's main lugs, a transfer switch's utility and generator
+  inputs as two mains). A back-fed main breaker in branch spaces is an
+  ordinary breaker.
 - `label` is free text: amps, speed or PoE, what the terminal drives.
 
 Overlapping spaces, duplicate IDs, more than three poles, or a half other than

@@ -118,6 +118,42 @@ try {
   });
   assert(pin, "living circuit leaves breaker 2 on the panel's right edge");
 
+  // A main (supply) row and a linked breaker crossing halves, typed into
+  // the editor as "main" and "B/A".
+  await page.locator(".port-editor summary").click();
+  for (const [id, pos, poles, half] of [
+    ["MAIN", "main", "2", ""],
+    ["7B/9A", "7", "2", "B/A"],
+    ["7A", "7", "1", "A"],
+  ]) {
+    await page.locator("#add-port").click();
+    const row = page.locator("tr[data-row]").last();
+    await row.locator('[name="id"]').fill(id);
+    await row.locator('[name="position"]').fill(pos);
+    await row.locator('[name="poles"]').selectOption(poles);
+    await row.locator('[name="half"]').fill(half);
+  }
+  await page.locator("#ports-form button:not([type])").click();
+  await page.waitForSelector(
+    '.node.faceplate[data-id="panel"] [data-port="MAIN"]',
+  );
+  assert.match(
+    await page.locator(".schedule tbody tr").first().textContent(),
+    /^Main\s*MAIN/,
+  );
+  const linked = await page.evaluate(() => {
+    const at = (id) =>
+      [
+        ...document.querySelectorAll(
+          `.node.faceplate[data-id="panel"] [data-port="${id}"] rect`,
+        ),
+      ].map((r) => [+r.getAttribute("y"), +r.getAttribute("height")])[0];
+    return { main: at("MAIN"), one: at("1"), b79: at("7B/9A"), a7: at("7A") };
+  });
+  assert(linked.main[0] < linked.one[0], "the main row sits above space 1");
+  assert(linked.a7[0] + linked.a7[1] < linked.b79[0], "7B/9A starts below 7A");
+  await page.locator(".port-editor summary").click();
+
   // Port editor: a 12-port switch, label one, assign the Ethernet uplink.
   await page.locator('.tree-row[data-select="router"]').click();
   await page.locator(".port-editor summary").click();
@@ -198,7 +234,7 @@ try {
   await page.locator("#exit-focus").click();
   assert.deepEqual(errors, []);
   console.log(
-    "Physical checks passed: breaker schedule, faceplates, port pins, port editor, focus and trace, picking.",
+    "Physical checks passed: breaker schedule, faceplates, port pins, mains and linked half-space breakers, port editor, focus and trace, picking.",
   );
 } finally {
   if (original) {

@@ -48,10 +48,45 @@ pub struct Port {
     /// "A" or "B": one half of a tandem (twin) breaker sharing its space.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub half: Option<String>,
+    /// The half of each space it occupies, one per pole ("A", "B", or "" for
+    /// the whole space), for linked breakers that change half from space to
+    /// space: a quad's outer pair is ["A", "B"] over 1 and 3 (1A/3B), its
+    /// inner pair ["B", "A"] (1B/3A). Use instead of `half`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub halves: Vec<String>,
+    /// The thing's supply: a panel's main breaker or main lugs, a switch's
+    /// uplink, a controller's line input. Drawn in its own row above the
+    /// numbered positions, where an incoming feed lands. Takes no position.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub main: bool,
 }
 impl Port {
     fn poles(&self) -> u32 {
         self.poles.unwrap_or(1).max(1)
+    }
+    /// The half of the k-th space it covers, if only half.
+    fn half_at(&self, k: u32) -> Option<&str> {
+        match self.halves.get(k as usize) {
+            Some(h) => Some(h.as_str()).filter(|h| !h.is_empty()),
+            None => self.half.as_deref(),
+        }
+    }
+    /// The spaces it covers, as printed: "14", "1/3", "5A", "7B/9A".
+    fn spaces_label(&self, step: u32) -> String {
+        let Some(start) = self.position else {
+            return String::new();
+        };
+        let spaces = (0..self.poles()).map(|k| start + k * step);
+        if self.halves.is_empty() {
+            spaces.map(|s| s.to_string()).collect::<Vec<_>>().join("/")
+                + self.half.as_deref().unwrap_or("")
+        } else {
+            spaces
+                .zip(&self.halves)
+                .map(|(s, h)| format!("{s}{h}"))
+                .collect::<Vec<_>>()
+                .join("/")
+        }
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -185,6 +220,14 @@ pub struct PortBox {
     pub height: f64,
     /// Which card edge its wires leave from.
     pub side: Side,
+    /// 0 for a port's first (or only) box. A linked breaker whose spaces
+    /// are not adjacent (a quad's outer pair, 1A + 3B) has a box per space;
+    /// the later ones are drawn tied to the first. Wires attach to box 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub segment: u32,
+}
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -304,6 +347,24 @@ fn validate_ports(e: &Entity) -> Result<(), String> {
         if p.half.as_deref().is_some_and(|h| h != "A" && h != "B") {
             return Err(format!("{}: port {} half must be A or B", e.name, p.id));
         }
+        if !p.halves.is_empty()
+            && (p.half.is_some()
+                || p.halves.len() != p.poles() as usize
+                || p.halves
+                    .iter()
+                    .any(|h| !matches!(h.as_str(), "A" | "B" | "")))
+        {
+            return Err(format!(
+                "{}: port {} halves needs one of A, B or \"\" per pole (and no half)",
+                e.name, p.id
+            ));
+        }
+        if p.main && p.position.is_some() {
+            return Err(format!(
+                "{}: main port {} takes no position (a back-fed main in spaces is an ordinary breaker)",
+                e.name, p.id
+            ));
+        }
         let Some(start) = p.position else { continue };
         if start == 0 || start > 999 {
             return Err(format!("{}: port {} position must be 1-999", e.name, p.id));
@@ -313,8 +374,8 @@ fn validate_ports(e: &Entity) -> Result<(), String> {
         } else {
             1
         };
-        for space in (0..p.poles()).map(|k| start + k * step) {
-            let half = p.half.as_deref();
+        for (k, space) in (0..p.poles()).map(|k| (k, start + k * step)) {
+            let half = p.half_at(k);
             match taken.get(&space) {
                 // Two halves of one tandem space.
                 Some(Some(other)) if half.is_some_and(|h| h != *other) => {
@@ -438,15 +499,29 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
         width,
         height: rows * FACE_ROW - 4.,
         side,
+        segment: 0,
     };
     let mut ports = Vec::new();
     let mut empty = Vec::new();
-    let mut rows = 0_f64;
-    let width;
-    let unpositioned: Vec<&Port> = e.ports.iter().filter(|p| p.position.is_none()).collect();
+    let width = if kind == Faceplate::Panel { 320. } else { 240. };
+    // Supplies first: a row each above the numbered positions.
+    let mains: Vec<&Port> = e.ports.iter().filter(|p| p.main).collect();
+    for (i, p) in mains.iter().enumerate() {
+        let mut b = row_box(10., i as f64, 1., width - 20., Side::Either);
+        b.id = p.id.clone();
+        b.label = p.label.clone();
+        b.position = "MAIN".into();
+        ports.push(b);
+    }
+    let top = mains.len() as f64;
+    let mut rows = top;
+    let unpositioned: Vec<&Port> = e
+        .ports
+        .iter()
+        .filter(|p| p.position.is_none() && !p.main)
+        .collect();
     if kind == Faceplate::Panel {
         // Two columns: odd spaces down the left, even down the right.
-        width = 320.;
         let col = (width - 30.) / 2.;
         let column = |space: u32| {
             if space % 2 == 1 {
@@ -456,44 +531,62 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
             }
         };
         let mut used = BTreeSet::new();
+        let row_of = |space: u32| top + ((space - 1) / 2) as f64;
         for p in e.ports.iter().filter(|p| p.position.is_some()) {
             let start = p.position.unwrap();
-            let spaces: Vec<u32> = (0..p.poles()).map(|k| start + 2 * k).collect();
-            used.extend(spaces.iter().copied());
             let (x, side) = column(start);
-            let row = ((start - 1) / 2) as f64;
-            let mut b = row_box(x, row, p.poles() as f64, col, side);
-            // A tandem's halves split its space top (A) and bottom (B).
-            if let Some(h) = &p.half {
-                b.height = (FACE_ROW - 4.) / 2. - 1.;
-                if h == "B" {
-                    b.y += b.height + 2.;
+            // Each space it covers, as a vertical span: a whole space, or
+            // its top (A) or bottom (B) half. Adjacent spans merge into one
+            // box (a 2-pole breaker, or 7B/9A); a gap starts a new segment.
+            let half_h = (FACE_ROW - 4.) / 2. - 1.;
+            let mut spans: Vec<(f64, f64, String)> = Vec::new();
+            for k in 0..p.poles() {
+                let space = start + 2 * k;
+                used.insert(space);
+                let y0 = FACE_HEADER + row_of(space) * FACE_ROW;
+                let half = p.half_at(k);
+                let (top_y, bottom_y) = match half {
+                    Some("A") => (y0, y0 + half_h),
+                    Some(_) => (y0 + half_h + 2., y0 + FACE_ROW - 4.),
+                    None => (y0, y0 + FACE_ROW - 4.),
+                };
+                let label = format!("{space}{}", half.unwrap_or(""));
+                let joins = k > 0 && p.half_at(k - 1) != Some("A") && half != Some("B");
+                match spans.last_mut() {
+                    Some(last) if joins => {
+                        last.1 = bottom_y;
+                        last.2 = format!("{}/{label}", last.2);
+                    }
+                    _ => spans.push((top_y, bottom_y, label)),
                 }
+                rows = rows.max(row_of(space) + 1.);
             }
-            b.id = p.id.clone();
-            b.label = p.label.clone();
-            b.position = spaces
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join("/")
-                + p.half.as_deref().unwrap_or("");
-            rows = rows.max(row + p.poles() as f64);
-            ports.push(b);
+            for (i, (top_y, bottom_y, label)) in spans.into_iter().enumerate() {
+                let mut b = row_box(x, 0., 1., col, side);
+                b.y = top_y;
+                b.height = bottom_y - top_y;
+                b.id = p.id.clone();
+                b.segment = i as u32;
+                b.position = label;
+                if i == 0 {
+                    b.label = p.label.clone();
+                    b.position = p.spaces_label(2);
+                }
+                ports.push(b);
+            }
         }
         let last = used.iter().max().copied().unwrap_or(0);
         for space in 1..=last + (last % 2) {
             if !used.contains(&space) {
                 let (x, side) = column(space);
-                let mut b = row_box(x, ((space - 1) / 2) as f64, 1., col, side);
+                let mut b = row_box(x, row_of(space), 1., col, side);
                 b.position = space.to_string();
                 empty.push(b);
-                rows = rows.max(((space - 1) / 2) as f64 + 1.);
+                rows = rows.max(row_of(space) + 1.);
             }
         }
     } else {
         // One row per port, in port order; gaps in the numbering stay visible.
-        width = 240.;
         let mut positioned: Vec<&Port> = e.ports.iter().filter(|p| p.position.is_some()).collect();
         positioned.sort_by_key(|p| p.position);
         let mut taken = BTreeSet::new();
@@ -504,7 +597,7 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
             }
             let mut b = row_box(
                 10.,
-                (at - 1) as f64,
+                top + (at - 1) as f64,
                 p.poles() as f64,
                 width - 20.,
                 Side::Either,
@@ -512,12 +605,12 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
             b.id = p.id.clone();
             b.label = p.label.clone();
             b.position = at.to_string();
-            rows = rows.max((at - 1 + p.poles()) as f64);
+            rows = rows.max(top + (at - 1 + p.poles()) as f64);
             ports.push(b);
         }
-        for at in 1..=rows as u32 {
+        for at in 1..=(rows - top) as u32 {
             if !taken.contains(&at) {
-                let mut b = row_box(10., (at - 1) as f64, 1., width - 20., Side::Either);
+                let mut b = row_box(10., top + (at - 1) as f64, 1., width - 20., Side::Either);
                 b.position = at.to_string();
                 empty.push(b);
             }
@@ -4208,6 +4301,8 @@ mod tests {
             position: Some(position),
             poles: Some(poles),
             half: half.map(Into::into),
+            halves: Vec::new(),
+            main: false,
         }
     }
     /// The sample with a breaker schedule on its panel: 1 kitchen, 2 living,
@@ -4352,6 +4447,97 @@ mod tests {
         let unassigned = face.unassigned.unwrap();
         assert_eq!(unassigned.y, FACE_HEADER + 3. * FACE_ROW);
         assert_eq!(size.height, FACE_HEADER + 4. * FACE_ROW + 8.);
+    }
+    fn linked(id: &str, position: u32, halves: [&str; 2]) -> Port {
+        Port {
+            halves: halves.map(String::from).to_vec(),
+            ..port(id, position, 2, None)
+        }
+    }
+    /// D's quad breaker and the barn apartment's linked pairs: a pole may
+    /// sit in a different half of each space it covers.
+    #[test]
+    fn linked_breakers_take_a_half_per_space_and_mains_sit_on_top() {
+        let mut doc = panel_doc();
+        let panel = doc.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        panel.ports = vec![
+            Port {
+                main: true,
+                ..port("MAIN", 1, 2, None)
+            },
+            linked("1A/3B", 1, ["A", "B"]),
+            linked("1B/3A", 1, ["B", "A"]),
+            linked("7B/9A", 7, ["B", "A"]),
+            port("7A", 7, 1, Some("A")),
+            port("9B", 9, 1, Some("B")),
+            port("2", 2, 1, None),
+        ];
+        panel.ports[0].position = None;
+        for c in &mut doc.connections {
+            for ep in &mut c.endpoints {
+                ep.port = None;
+            }
+        }
+        validate(&doc).unwrap();
+        let panel = doc.entities.iter().find(|e| e.id == "panel").unwrap();
+        let (_, face) = faceplate_layout(panel, false);
+        let boxes = |id: &str| face.ports.iter().filter(|b| b.id == id).collect::<Vec<_>>();
+        // The main breaker spans the top, above space 1.
+        let main = boxes("MAIN")[0];
+        assert_eq!((main.position.as_str(), main.y), ("MAIN", FACE_HEADER));
+        assert!(main.width > 280.);
+        let first_row = FACE_HEADER + FACE_ROW;
+        // Quad outer pair: 1A and 3B are not adjacent, so two tied segments.
+        let outer = boxes("1A/3B");
+        assert_eq!(outer.len(), 2);
+        assert_eq!((outer[0].segment, outer[0].position.as_str()), (0, "1A/3B"));
+        assert_eq!((outer[1].segment, outer[1].position.as_str()), (1, "3B"));
+        assert_eq!(outer[0].y, first_row);
+        // 3B: the lower half of the next row (space 3).
+        assert!(outer[1].y > first_row + FACE_ROW + FACE_ROW / 4.);
+        assert!(outer[1].y + outer[1].height <= first_row + 2. * FACE_ROW);
+        // Inner pair 1B/3A is one box between them.
+        let inner = boxes("1B/3A");
+        assert_eq!(inner.len(), 1);
+        assert!(inner[0].y > outer[0].y + outer[0].height);
+        assert!(inner[0].y + inner[0].height < outer[1].y);
+        // 7B/9A is one box from 7's lower half to 9's upper half, between 7A and 9B.
+        let (b79, a7, b9) = (boxes("7B/9A")[0], boxes("7A")[0], boxes("9B")[0]);
+        assert!(a7.y + a7.height < b79.y && b79.y + b79.height < b9.y);
+        // Wires attach to a port's first segment.
+        let n = Node {
+            id: "panel".into(),
+            position: Point::default(),
+            children: 0,
+            width: 320.,
+            height: 400.,
+            expanded_width: 320.,
+            expanded_height: 400.,
+            depth: 0,
+            container: false,
+            collapsed: false,
+            faceplate: Some(face.clone()),
+        };
+        let pin = faceplate_pin(&n, Some("1A/3B")).unwrap();
+        assert_eq!(pin.y, outer[0].y + outer[0].height / 2.);
+
+        // A space can't take the same half twice, or a whole and a half.
+        let mut bad = doc.clone();
+        let p = bad.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        p.ports.push(port("3A", 3, 1, Some("A")));
+        assert!(validate(&bad).is_err(), "3A is the inner pair's");
+        let mut bad = doc.clone();
+        let p = bad.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        p.ports[1].halves = vec!["A".into()];
+        assert!(validate(&bad).is_err(), "one half per pole");
+        let mut bad = doc.clone();
+        let p = bad.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        p.ports[1].half = Some("A".into());
+        assert!(validate(&bad).is_err(), "halves replaces half");
+        let mut bad = doc.clone();
+        let p = bad.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        p.ports[0].position = Some(11);
+        assert!(validate(&bad).is_err(), "a main takes no position");
     }
     #[test]
     fn faceplate_wires_attach_at_their_ports() {
