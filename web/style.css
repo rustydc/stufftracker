@@ -883,3 +883,59 @@ label.toggle {
 .float-bar[hidden] {
   display: none;
 }
+/* Phones: tapping a thing opens its details in a bottom sheet. */
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 62dvh;
+  overflow-y: auto;
+  background: #fff;
+  border-top: 1px solid #d6dfd5;
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -8px 24px rgba(38, 61, 52, 0.16);
+  padding: 14px 16px calc(16px + env(safe-area-inset-bottom));
+  z-index: 5;
+}
+.sheet[hidden] {
+  display: none;
+}
+.sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sheet-head h2 {
+  margin: 4px 0 2px;
+  font-size: 17px;
+}
+.sheet-head p {
+  margin: 0;
+}
+.sheet-close {
+  padding: 6px 10px;
+}
+.sheet .focus-actions button {
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.sheet label.toggle {
+  font-size: 14px;
+  padding: 4px 0;
+}
+.sheet label.toggle input {
+  width: 20px;
+  height: 20px;
+}
+@media (min-width: 801px) {
+  .sheet {
+    display: none;
+  }
+}
+#select-mode.on {
+  background: #2f6b4d;
+  color: #fff;
+  border-color: #2f6b4d;
+}

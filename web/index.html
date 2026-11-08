@@ -71,6 +71,12 @@
             </svg>
             <div id="focus-bar" class="float-bar" hidden></div>
             <div id="pick-bar" class="float-bar pick" hidden></div>
+            <section
+              id="sheet"
+              class="sheet"
+              hidden
+              aria-label="Details"
+            ></section>
             <div class="canvas-hint">
               Drag space headers to move contents · Double-click to fold ·
               Shift-drag to select · Scroll to zoom
@@ -79,7 +85,14 @@
               <button id="zoom-out" aria-label="Zoom out">−</button
               ><span id="zoom">100%</span
               ><button id="zoom-in" aria-label="Zoom in">＋</button
-              ><button id="fit">Fit all</button>
+              ><button id="fit">Fit all</button
+              ><button
+                id="select-mode"
+                aria-pressed="false"
+                title="Pick things by tapping or lassoing"
+              >
+                Select
+              </button>
             </div>
           </div>
           <footer>

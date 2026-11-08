@@ -103,11 +103,105 @@ try {
     ]);
     assert((await camera()).scale < pan.scale);
     await touch("touchEnd", []);
+
+    // A tap opens the thing's bottom sheet; a drag does not.
+    await page.locator("#fit").click();
+    const tapOn = async (id) => {
+      const b = await page.locator(`.node[data-id="${id}"]`).boundingBox();
+      const p = [b.x + b.width / 2, b.y + Math.min(20, b.height / 2)];
+      await touch("touchStart", [[1, ...p]]);
+      await touch("touchEnd", []);
+    };
+    const online = !url.includes("offline");
+    let original;
+    if (online) {
+      // Give the panel ports so the sheet offers its physical layout.
+      const cur = await (await page.request.get(`${url}api/document`)).json();
+      original = structuredClone(cur.document);
+      const panel = cur.document.entities.find((e) => e.id === "panel");
+      panel.faceplate = "panel";
+      panel.ports = [
+        { id: "1", label: "20 A kitchen", position: 1 },
+        { id: "2", label: "15 A living", position: 2 },
+      ];
+      await page.request.put(`${url}api/document`, {
+        data: { revision: cur.revision, document: cur.document },
+      });
+      await page.reload();
+      await page.waitForSelector(".node");
+      await page.locator("#fit").click();
+    }
+    try {
+      assert(await page.locator("#sheet").isHidden());
+      await tapOn("lamp");
+      await page.waitForSelector("#sheet:not([hidden])");
+      assert.match(
+        await page.locator("#sheet h2").textContent(),
+        /Pendant lights/,
+      );
+      await page.locator("#sheet .sheet-close").click();
+      assert(await page.locator("#sheet").isHidden());
+      const lamp = await page.locator('.node[data-id="lamp"]').boundingBox();
+      await touch("touchStart", [[1, lamp.x + 20, lamp.y + 20]]);
+      await touch("touchMove", [[1, lamp.x + 60, lamp.y + 50]]);
+      await touch("touchEnd", []);
+      assert(await page.locator("#sheet").isHidden(), "a drag is not a tap");
+      await tapOn("lamp");
+      await page.locator('#sheet [data-focus="upstream"]').click();
+      await page.waitForSelector("#focus-bar:not([hidden])");
+      assert(await page.locator("#sheet").isHidden());
+      const traced = await page.evaluate(() =>
+        [...document.querySelectorAll(".node:not(.space)")]
+          .map((n) => n.dataset.id)
+          .sort(),
+      );
+      assert.deepEqual(traced, ["ha", "lamp", "panel", "router"]);
+      await page.locator("#exit-focus").click();
+      await page.locator("#fit").click();
+
+      // Select mode: taps pick, then show only those.
+      await page.locator("#select-mode").click();
+      await page.waitForSelector("#pick-bar:not([hidden])");
+      await tapOn("tv");
+      await tapOn("desk");
+      assert(await page.locator("#sheet").isHidden(), "picking opens no sheet");
+      assert.match(await page.locator("#pick-bar").textContent(), /2 selected/);
+      await page.locator("#focus-picked").click();
+      const only = await page.evaluate(() =>
+        [...document.querySelectorAll(".node:not(.space)")]
+          .map((n) => n.dataset.id)
+          .sort(),
+      );
+      assert.deepEqual(only, ["desk", "tv"]);
+      assert.equal(
+        await page.locator("#select-mode").getAttribute("aria-pressed"),
+        "false",
+      );
+      await page.locator("#exit-focus").click();
+
+      if (online) {
+        await page.locator("#fit").click();
+        await tapOn("panel");
+        await page.locator("#sheet .faceplate-toggle").check();
+        await page.waitForSelector('.node.faceplate[data-id="panel"]');
+        assert.equal(
+          await page.locator("#sheet .schedule tbody tr").count(),
+          3,
+        );
+      }
+    } finally {
+      if (original) {
+        const cur = await (await page.request.get(`${url}api/document`)).json();
+        await page.request.put(`${url}api/document`, {
+          data: { revision: cur.revision, document: original },
+        });
+      }
+    }
     assert.deepEqual(errors, []);
     await context.close();
   }
   console.log(
-    "Mobile touch checks passed: pinch, moving focal point, remaining-finger pan, cancellation, offline viewer.",
+    "Mobile touch checks passed: pinch, moving focal point, remaining-finger pan, cancellation, tap sheet, trace, select mode, faceplate toggle, offline viewer.",
   );
 } finally {
   await browser.close();

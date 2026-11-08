@@ -70,7 +70,12 @@ automation. Subsequent boots preserve your data.
   and export another snapshot. They cannot edit the inventory or save to a server.
   Interaction is stateless unless exported again.
 
-On narrow screens the inspector is hidden: use a desktop viewport to edit.
+On narrow screens (phones) the inspector column is hidden. Tap a thing to open
+its details in a bottom sheet: show only it, trace what feeds it or what it
+feeds, toggle its physical layout, and read its port schedule and connections.
+**Select** (beside the zoom controls) turns taps into picks and a drag into a
+lasso, for **Show only these**. Editing inventory and ports needs a desktop
+viewport.
 
 ## Darude grain
 

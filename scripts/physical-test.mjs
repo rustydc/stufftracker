@@ -80,7 +80,7 @@ try {
   const rows = page.locator(".schedule tbody tr");
   assert.equal(await rows.count(), 6, "5 breakers + not assigned");
   assert.match(await rows.nth(2).textContent(), /3\/5.*30 A dryer.*spare/);
-  await page.locator("#faceplate-toggle").check();
+  await page.locator("#inspector .faceplate-toggle").check();
   await page.waitForSelector('.node.faceplate[data-id="panel"]');
   assert.equal(
     await page.locator('.node.faceplate[data-id="panel"] .slot.empty').count(),

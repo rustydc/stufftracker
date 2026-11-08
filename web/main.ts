@@ -177,6 +177,12 @@ function renderBars() {
   pick.hidden = !picked.size;
   if (picked.size) {
     pick.innerHTML = `<span>${picked.size} selected</span><button id="focus-picked" class="primary">Show only these</button><button id="clear-picked">Clear</button>`;
+  } else if (selectMode) {
+    pick.hidden = false;
+    pick.innerHTML = `<span>Tap things to pick them, or drag to lasso</span><button id="clear-picked">Done</button>`;
+    $("clear-picked").onclick = () => setSelectMode(false);
+  }
+  if (picked.size) {
     $("focus-picked").onclick = () =>
       setFocus({ entities: [...picked], hops: 0, direction: "both" });
     $("clear-picked").onclick = () => {
@@ -184,6 +190,8 @@ function renderBars() {
       renderScene();
       renderBars();
     };
+    if (selectMode)
+      $("focus-picked").addEventListener("click", () => setSelectMode(false));
   }
 }
 function render() {
@@ -195,6 +203,7 @@ function render() {
   renderLayers();
   renderInspector();
   renderBars();
+  renderSheet();
 
   $<HTMLButtonElement>("save-document").disabled = !writable || !dirty;
   if (first) {
@@ -366,7 +375,7 @@ function scheduleHtml(e: Entity) {
           )
           .join("")
       : '<span class="muted">spare</span>';
-  return `<div class="schedule"><div class="schedule-head"><h3>${e.faceplate === "panel" ? "Panel schedule" : "Ports"}</h3><button type="button" id="print-schedule">Print</button></div><table><thead><tr><th>${e.faceplate === "panel" ? "Space" : "#"}</th><th>Port</th><th>Connected to</th></tr></thead><tbody>${rows
+  return `<div class="schedule"><div class="schedule-head"><h3>${e.faceplate === "panel" ? "Panel schedule" : "Ports"}</h3><button type="button" class="print-schedule">Print</button></div><table><thead><tr><th>${e.faceplate === "panel" ? "Space" : "#"}</th><th>Port</th><th>Connected to</th></tr></thead><tbody>${rows
     .map(
       (r) =>
         `<tr><td>${esc(r.position)}</td><td><b>${esc(r.port.id)}</b>${r.port.label ? `<small>${esc(r.port.label)}</small>` : ""}</td><td>${cell(r.connections)}</td></tr>`,
@@ -376,7 +385,7 @@ function scheduleHtml(e: Entity) {
     )}${unassigned.length ? `<tr class="unassigned"><td>?</td><td>Not assigned</td><td>${cell(unassigned)}</td></tr>` : ""}</tbody></table></div>`;
 }
 // The selected thing's connections; with ports, each can be assigned one.
-function connectionsHtml(e: Entity) {
+function connectionsHtml(e: Entity, assign: boolean) {
   const mine = doc.connections.filter((c) =>
     c.endpoints.some((ep) => ep.entity === e.id),
   );
@@ -396,7 +405,7 @@ function connectionsHtml(e: Entity) {
       const arrow =
         ep.role === "source" ? "→" : ep.role === "target" ? "←" : "↔";
       const select =
-        writable && ports.length
+        assign && ports.length
           ? `<select data-assign="${esc(c.id)}" aria-label="Port for ${esc(c.name)}"><option value="">port…</option>${ports.map((p) => `<option value="${esc(p.id)}" ${ep.port === p.id ? "selected" : ""}>${esc(p.id)}${p.label ? " · " + esc(p.label) : ""}</option>`).join("")}</select>`
           : ep.port
             ? `<small>@${esc(ep.port)}</small>`
@@ -451,11 +460,7 @@ function renderInspector() {
     ]),
   ];
   $("inspector").innerHTML =
-    `<span class="eyebrow">SELECTED ${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${doc.connections.filter((c) => c.endpoints.some((ep) => ep.entity === e.id)).length} connections · ${doc.entities.filter((n) => n.parent === e.id).length} children</p>${e.links.map((l) => `<div class="external-link"><b>${esc(l.provider.replaceAll("_", " ").toUpperCase())} · ${esc(l.kind)}</b>${esc(l.external_id)}</div>`).join("")}<div class="focus-actions"><button data-focus="both" title="Show this and what it connects to">Show only this</button><button data-focus="upstream" title="Trace everything that feeds this">↑ What feeds this</button><button data-focus="downstream" title="Trace everything this feeds">↓ What this feeds</button></div>${
-      hasLayout && leaf
-        ? `<label class="toggle"><input type="checkbox" id="faceplate-toggle" ${view.faceplates?.includes(e.id) ? "checked" : ""}> Show physical layout</label>`
-        : ""
-    }${scheduleHtml(e)}${connectionsHtml(e)}${
+    `<span class="eyebrow">SELECTED ${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${doc.connections.filter((c) => c.endpoints.some((ep) => ep.entity === e.id)).length} connections · ${doc.entities.filter((n) => n.parent === e.id).length} children</p>${e.links.map((l) => `<div class="external-link"><b>${esc(l.provider.replaceAll("_", " ").toUpperCase())} · ${esc(l.kind)}</b>${esc(l.external_id)}</div>`).join("")}${actionsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, writable)}${
       writable
         ? `<form id="entity-form"><label class="field">Name<input name="name" value="${esc(e.name)}" required maxlength="150"></label><label class="field">Type<input name="kind" list="kinds" value="${esc(e.kind)}" required maxlength="40"><datalist id="kinds">${kinds.map((k) => `<option value="${esc(k)}">`).join("")}</datalist></label><label class="field">Parent<select name="parent"><option value="">Top level</option>${doc.entities
             .filter((n) => !descendants.has(n.id))
@@ -523,39 +528,19 @@ function renderInspector() {
       selected = "";
       markDirty();
     };
-  document.querySelectorAll<HTMLButtonElement>("[data-focus]").forEach(
-    (b) =>
-      (b.onclick = () => {
-        const direction = b.dataset.focus as Direction;
-        setFocus({
-          entities: [e.id],
-          hops: direction === "both" ? 1 : undefined,
-          direction,
-        });
-      }),
-  );
-  const toggle = $<HTMLInputElement>("faceplate-toggle");
-  if (toggle)
-    toggle.onchange = () => {
-      const set = new Set(view.faceplates || []);
-      if (toggle.checked) set.add(e.id);
-      else set.delete(e.id);
-      view.faceplates = [...set];
-      if (toggle.checked) settle(e.id);
-      render();
-    };
-  const print = $("print-schedule");
-  if (print) print.onclick = () => printSchedule(e);
-  document.querySelectorAll<HTMLSelectElement>("[data-assign]").forEach(
-    (sel) =>
-      (sel.onchange = () =>
-        tryEdit((d) => {
-          const c = d.connections.find((c) => c.id === sel.dataset.assign)!;
-          const ep = c.endpoints.find((ep) => ep.entity === e.id)!;
-          if (sel.value) ep.port = sel.value;
-          else delete ep.port;
-        })),
-  );
+  wireEntityActions($("inspector"), e);
+  $("inspector")
+    .querySelectorAll<HTMLSelectElement>("[data-assign]")
+    .forEach(
+      (sel) =>
+        (sel.onchange = () =>
+          tryEdit((d) => {
+            const c = d.connections.find((c) => c.id === sel.dataset.assign)!;
+            const ep = c.endpoints.find((ep) => ep.entity === e.id)!;
+            if (sel.value) ep.port = sel.value;
+            else delete ep.port;
+          })),
+    );
   const portsForm = $<HTMLFormElement>("ports-form");
   if (portsForm) {
     const details = portsForm.closest("details")!;
@@ -653,6 +638,76 @@ function renderInspector() {
       }
     };
   }
+}
+// The view actions for one thing: show it, trace it, draw its faceplate.
+// Shared by the inspector and the phone's bottom sheet.
+function actionsHtml(e: Entity) {
+  const leaf =
+    !doc.entities.some((n) => n.parent === e.id) && e.kind !== "space";
+  const hasLayout = !!(e.ports?.length || e.faceplate);
+  return `<div class="focus-actions"><button data-focus="both" title="Show this and what it connects to">Show only this</button><button data-focus="upstream" title="Trace everything that feeds this">↑ What feeds this</button><button data-focus="downstream" title="Trace everything this feeds">↓ What this feeds</button></div>${
+    hasLayout && leaf
+      ? `<label class="toggle"><input type="checkbox" class="faceplate-toggle" ${view.faceplates?.includes(e.id) ? "checked" : ""}> Show physical layout</label>`
+      : ""
+  }`;
+}
+function wireEntityActions(root: HTMLElement, e: Entity) {
+  root.querySelectorAll<HTMLButtonElement>("[data-focus]").forEach(
+    (b) =>
+      (b.onclick = () => {
+        const direction = b.dataset.focus as Direction;
+        sheetId = null;
+        setFocus({
+          entities: [e.id],
+          hops: direction === "both" ? 1 : undefined,
+          direction,
+        });
+      }),
+  );
+  const toggle = root.querySelector<HTMLInputElement>(".faceplate-toggle");
+  if (toggle)
+    toggle.onchange = () => {
+      const set = new Set(view.faceplates || []);
+      if (toggle.checked) set.add(e.id);
+      else set.delete(e.id);
+      view.faceplates = [...set];
+      if (toggle.checked) settle(e.id);
+      render();
+    };
+  const print = root.querySelector<HTMLButtonElement>(".print-schedule");
+  if (print) print.onclick = () => printSchedule(e);
+}
+// Phones have no inspector column: tapping a thing opens this sheet instead.
+let sheetId: string | null = null;
+const narrow = () => matchMedia("(max-width: 800px)").matches;
+function renderSheet() {
+  const sheet = $("sheet");
+  const e = sheetId ? doc.entities.find((x) => x.id === sheetId) : undefined;
+  sheet.hidden = !e;
+  if (!e) return;
+  const inside = doc.entities.filter((n) => n.parent === e.id).length;
+  const links = doc.connections.filter((c) =>
+    c.endpoints.some((ep) => ep.entity === e.id),
+  ).length;
+  sheet.innerHTML = `<div class="sheet-head"><div><span class="eyebrow">${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${links} connections${inside ? ` · ${inside} inside` : ""}</p></div><button class="sheet-close" aria-label="Close">✕</button></div>${actionsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, false)}`;
+  sheet.querySelector<HTMLButtonElement>(".sheet-close")!.onclick = () => {
+    sheetId = null;
+    renderSheet();
+  };
+  wireEntityActions(sheet, e);
+}
+// Select mode: on touch there is no shift key, so taps pick and a drag lassos.
+let selectMode = false;
+function setSelectMode(on: boolean) {
+  selectMode = on;
+  const b = $("select-mode");
+  b.classList.toggle("on", on);
+  b.setAttribute("aria-pressed", String(on));
+  if (on) {
+    sheetId = null;
+    renderSheet();
+  }
+  renderBars();
 }
 // A faceplate is larger than the card it replaces: re-drop it where it is
 // so its neighbours are pushed aside (in the full view, even mid-focus).
@@ -895,6 +950,7 @@ function pinchGeometry() {
   };
 }
 function startPinch() {
+  tap = null;
   const { center, distance } = pinchGeometry();
   finishDrag();
   drag = null;
@@ -907,9 +963,15 @@ function startPinch() {
     },
   };
 }
+const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 function endPointer(ev: PointerEvent) {
   if (!pointers.delete(ev.pointerId)) return;
   finishLasso();
+  if (tap && !pointers.size && ev.type === "pointerup" && narrow()) {
+    sheetId = tap.id;
+    renderSheet();
+  }
+  tap = null;
   // Land the drag where the pointer let go.
   finishDrag();
   if (pinch) {
@@ -941,8 +1003,10 @@ svg.addEventListener("pointerdown", (ev) => {
   }
   let id = target.closest("[data-id]")?.getAttribute("data-id") || null;
   const r = svg.getBoundingClientRect();
-  // Shift picks: click toggles a thing, dragging the canvas draws a lasso.
-  if (ev.shiftKey) {
+  // Shift (or Select mode, on touch) picks: a tap toggles a thing, dragging
+  // the canvas draws a lasso.
+  tap = null;
+  if (ev.shiftKey || selectMode) {
     if (id) {
       if (picked.has(id)) picked.delete(id);
       else picked.add(id);
@@ -951,6 +1015,7 @@ svg.addEventListener("pointerdown", (ev) => {
     } else lasso = { start: pointerPoint(ev), end: pointerPoint(ev) };
     return;
   }
+  tap = id ? { id, at: pointerPoint(ev) } : null;
   if (id) {
     selected = id;
     renderTree();
@@ -979,6 +1044,8 @@ svg.addEventListener("pointerdown", (ev) => {
   svg.setPointerCapture(ev.pointerId);
 });
 let lasso: { start: Point; end: Point } | null = null;
+// A press on a thing that ends where it began (no drag) is a tap.
+let tap: { id: string; at: Point } | null = null;
 function drawLasso() {
   const el = document.getElementById("lasso")!;
   if (!lasso) return el.setAttribute("visibility", "hidden");
@@ -1027,6 +1094,7 @@ svg.addEventListener("pointermove", (ev) => {
     drawLasso();
     return;
   }
+  if (tap && distance(pointerPoint(ev), tap.at) > 8) tap = null;
   if (pinch) {
     const { center, distance } = pinchGeometry();
     camera.scale = Math.max(
@@ -1100,6 +1168,7 @@ $("layers").onchange = (ev) => {
   render();
 };
 $("search").oninput = renderTree;
+$("select-mode").onclick = () => setSelectMode(!selectMode);
 $("fit").onclick = fit;
 $("zoom-in").onclick = () => zoom(1.2);
 $("zoom-out").onclick = () => zoom(1 / 1.2);
