@@ -1246,3 +1246,78 @@ label.toggle {
 .details-list .same:hover {
   color: #2f6b4d;
 }
+/* Wires are clickable: a wide invisible stroke under each one. */
+.route-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.route.selected-wire {
+  stroke-width: 4;
+  opacity: 1;
+}
+/* Connection and port inspectors. */
+.link-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: #2f6b4d;
+  text-align: left;
+  cursor: pointer;
+}
+.link-button:hover {
+  text-decoration: underline;
+}
+.eyebrow .link-button {
+  color: inherit;
+  letter-spacing: inherit;
+}
+.ends,
+.sharing {
+  margin: 10px 0;
+}
+.ends h3,
+.sharing h3 {
+  font-size: 12px;
+  margin: 0 0 6px;
+}
+.end {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-top: 1px solid #e6ebe4;
+  font-size: 12.5px;
+}
+.end .role {
+  width: 34px;
+  color: #82917f;
+  font-size: 11px;
+}
+.port-chip {
+  margin-left: auto;
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 5px;
+  background: #eef4ec;
+}
+.sharing .link-button {
+  display: block;
+  padding: 2px 0;
+  font-size: 12.5px;
+}
+#inspector h2 small {
+  font-size: 13px;
+  font-weight: 500;
+  color: #6d806f;
+}
+.schedule .port-id {
+  color: inherit;
+}
+.conn .link-button {
+  color: inherit;
+  font-size: 12px;
+}

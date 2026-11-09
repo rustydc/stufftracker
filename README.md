@@ -47,13 +47,22 @@ automation. Subsequent boots preserve your data.
   address, a model or serial number), a link for more information, or a file
   (a photo, a PDF manual) uploaded from your device. They show in the
   inspector, and search finds things by them.
+- **Connections and ports.** Click a wire to inspect its connection: its
+  layer, its ends (with ports), other links sharing the wire, and its details
+  (a cable's label, length or colour, a circuit's wire gauge); rename it,
+  change its layer, edit its details or delete it there. Click a breaker or
+  port, on a faceplate or in the schedule, to inspect it: its position and
+  rating, what it connects to, and its own details (a VLAN, a wire colour, the
+  directory label, a multi-interface device's IP address). Ends, ports and
+  connection lists all link to each other; phones show the same on the sheet.
 - **Filters.** **Filter** (beside the saved views) shows only the things whose
   details match: pick a detail key (or Name, Kind, Any field), a test
   (contains, is, has, doesn't have) and a value, and combine conditions with
   all or any, with a live count of matches. Clicking a detail's key in the
   inspector shows everything with that key, ⧉ beside a value everything with
   the same value, and **Show matches on canvas** under the inventory search
-  shows what the search finds. A filter is a focus: the focus bar widens it to
+  shows what the search finds. A thing also matches through its ports'
+  details, and a connection that matches brings its ends. A filter is a focus: the focus bar widens it to
   the matches' neighbours (Only, 1, 2, 3, All hops), and it saves with a view.
 - **Physical layouts.** A thing can carry ports: switch ports, breaker-panel
   spaces, or controller terminals. Edit them under **Physical layout & ports**:

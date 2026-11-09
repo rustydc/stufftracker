@@ -50,13 +50,26 @@ pub enum PropertyValue {
         size: u64,
     },
 }
+fn file_ids(props: &[Property]) -> impl Iterator<Item = &str> {
+    props.iter().filter_map(|p| match &p.value {
+        PropertyValue::File { attachment, .. } => Some(attachment.as_str()),
+        _ => None,
+    })
+}
 impl Entity {
-    /// The attachments its details refer to.
+    /// The attachments its details (and its ports' details) refer to.
     pub fn attachments(&self) -> impl Iterator<Item = &str> {
-        self.properties.iter().filter_map(|p| match &p.value {
-            PropertyValue::File { attachment, .. } => Some(attachment.as_str()),
-            _ => None,
-        })
+        file_ids(&self.properties).chain(self.ports.iter().flat_map(|p| file_ids(&p.properties)))
+    }
+}
+impl Document {
+    /// Every attachment a detail anywhere in the inventory refers to.
+    pub fn attachments(&self) -> impl Iterator<Item = &str> {
+        self.entities.iter().flat_map(Entity::attachments).chain(
+            self.connections
+                .iter()
+                .flat_map(|c| file_ids(&c.properties)),
+        )
     }
 }
 /// An attachment ID: the lowercase hex SHA-256 of its bytes.
@@ -112,6 +125,11 @@ pub struct Port {
     /// Ground-fault / arc-fault protection built into the breaker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protection: Option<Protection>,
+    /// Details of this port: a breaker's wire gauge or directory label, a
+    /// switch port's VLAN or patch position, a terminal's wire colour, the IP
+    /// address of a device's own interface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<Property>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -179,6 +197,10 @@ pub struct Connection {
     pub name: String,
     pub layer: String,
     pub endpoints: Vec<Endpoint>,
+    /// Details of the link itself: a cable's label, length or colour, the
+    /// conduit it runs in, a circuit's wire gauge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<Property>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layer {
@@ -274,24 +296,37 @@ impl Property {
         }
     }
 }
-/// Whether `e` satisfies `filter`. An empty filter matches nothing.
+/// Whether `e` satisfies `filter`: its name, kind, details and its ports'
+/// details. An empty filter matches nothing.
 pub fn matches(e: &Entity, filter: &Filter) -> bool {
+    let props = e
+        .properties
+        .iter()
+        .chain(e.ports.iter().flat_map(|p| &p.properties));
+    satisfies(&e.name, &e.kind, props, filter)
+}
+/// Whether a connection satisfies `filter`: its name, layer (as `@kind`) and
+/// details.
+pub fn matches_connection(c: &Connection, filter: &Filter) -> bool {
+    satisfies(&c.name, &c.layer, c.properties.iter(), filter)
+}
+fn satisfies<'a>(
+    name: &str,
+    kind: &str,
+    props: impl Iterator<Item = &'a Property> + Clone,
+    filter: &Filter,
+) -> bool {
     let test = |c: &Condition| {
         let want = c.value.trim().to_lowercase();
         let values: Vec<String> = match c.key.as_str() {
-            "@name" => vec![e.name.clone()],
-            "@kind" => vec![e.kind.clone()],
-            "@any" => [e.name.clone(), e.kind.clone()]
+            "@name" => vec![name.to_string()],
+            "@kind" => vec![kind.to_string()],
+            "@any" => [name.to_string(), kind.to_string()]
                 .into_iter()
-                .chain(
-                    e.properties
-                        .iter()
-                        .flat_map(|p| [p.key.clone(), p.search_text()]),
-                )
+                .chain(props.clone().flat_map(|p| [p.key.clone(), p.search_text()]))
                 .collect(),
-            key => e
-                .properties
-                .iter()
+            key => props
+                .clone()
                 .filter(|p| p.key.trim().eq_ignore_ascii_case(key.trim()))
                 .map(Property::search_text)
                 .collect(),
@@ -310,6 +345,21 @@ pub fn matches(e: &Entity, filter: &Filter) -> bool {
     } else {
         filter.conditions.iter().all(test)
     }
+}
+/// The things a filter starts from: those it matches, and the endpoints of
+/// the connections it matches.
+pub fn filter_seeds(doc: &Document, filter: &Filter) -> BTreeSet<String> {
+    doc.entities
+        .iter()
+        .filter(|e| matches(e, filter))
+        .map(|e| e.id.clone())
+        .chain(
+            doc.connections
+                .iter()
+                .filter(|c| matches_connection(c, filter))
+                .flat_map(|c| c.endpoints.iter().map(|ep| ep.entity.clone())),
+        )
+        .collect()
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -463,6 +513,7 @@ pub fn validate(doc: &Document) -> Result<(), String> {
         if c.id.is_empty() || !connection_ids.insert(&c.id) {
             return Err("Connection IDs must be unique".into());
         }
+        validate_details(&format!("Connection {}", c.name), &c.properties)?;
         if !layers.contains(c.layer.as_str()) || c.endpoints.len() < 2 {
             return Err("Connection needs a layer and at least two endpoints".into());
         }
@@ -483,11 +534,18 @@ pub fn validate(doc: &Document) -> Result<(), String> {
 }
 
 fn validate_properties(e: &Entity) -> Result<(), String> {
-    if e.properties.len() > 100 {
-        return Err(format!("{}: at most 100 details", e.name));
+    validate_details(&e.name, &e.properties)?;
+    for p in &e.ports {
+        validate_details(&format!("{} port {}", e.name, p.id), &p.properties)?;
     }
-    for p in &e.properties {
-        let bad = |what: &str| Err(format!("{}: detail {:?} {what}", e.name, p.key));
+    Ok(())
+}
+fn validate_details(owner: &str, props: &[Property]) -> Result<(), String> {
+    if props.len() > 100 {
+        return Err(format!("{owner}: at most 100 details"));
+    }
+    for p in props {
+        let bad = |what: &str| Err(format!("{owner}: detail {:?} {what}", p.key));
         if p.key.trim().is_empty() || p.key.len() > 80 {
             return bad("needs a key of at most 80 characters");
         }
@@ -1106,13 +1164,7 @@ pub fn focus_set(doc: &Document, view: &View, focus: &Focus) -> BTreeSet<String>
         .iter()
         .filter(|id| exists.contains(id.as_str()))
         .cloned()
-        .chain(
-            focus
-                .filter
-                .iter()
-                .flat_map(|f| doc.entities.iter().filter(move |e| matches(e, f)))
-                .map(|e| e.id.clone()),
-        )
+        .chain(focus.filter.iter().flat_map(|f| filter_seeds(doc, f)))
         .collect();
     loop {
         let inside: Vec<String> = doc
@@ -3490,15 +3542,17 @@ struct MatchRequest {
     document: Document,
     filter: Filter,
 }
-/// The IDs of the things a filter matches, in inventory order.
+/// The IDs of the things a filter starts from (see `filter_seeds`), in
+/// inventory order.
 #[wasm_bindgen]
 pub fn matching(input: &str) -> Result<String, JsError> {
     let r: MatchRequest = serde_json::from_str(input)?;
+    let seeds = filter_seeds(&r.document, &r.filter);
     let ids: Vec<&str> = r
         .document
         .entities
         .iter()
-        .filter(|e| matches(e, &r.filter))
+        .filter(|e| seeds.contains(&e.id))
         .map(|e| e.id.as_str())
         .collect();
     Ok(serde_json::to_string(&ids)?)
@@ -4058,6 +4112,7 @@ mod tests {
                 id: layer.id.clone(),
                 name: layer.name.clone(),
                 layer: layer.id.clone(),
+                properties: Vec::new(),
                 endpoints: vec![
                     Endpoint {
                         entity: "panel".into(),
@@ -4104,6 +4159,7 @@ mod tests {
                 id: layer.id.clone(),
                 name: layer.name.clone(),
                 layer: layer.id.clone(),
+                properties: Vec::new(),
                 endpoints: vec![
                     Endpoint {
                         entity: "panel".into(),
@@ -4555,6 +4611,7 @@ mod tests {
             main: false,
             amps: None,
             protection: None,
+            properties: Vec::new(),
         }
     }
     /// The sample with a breaker schedule on its panel: 1 kitchen, 2 living,
@@ -5106,6 +5163,81 @@ mod tests {
         view.focus.as_mut().unwrap().hops = Some(1);
         let wider = focus_set(&doc, &view, view.focus.as_ref().unwrap());
         assert!(wider.contains("desk") && wider.contains("panel"));
+    }
+    #[test]
+    fn ports_and_connections_carry_details_too() {
+        let text = |k: &str, v: &str| Property {
+            key: k.into(),
+            value: PropertyValue::Text { text: v.into() },
+        };
+        let file = |id: char| Property {
+            key: "Photo".into(),
+            value: PropertyValue::File {
+                attachment: id.to_string().repeat(64),
+                name: "p.png".into(),
+                mime: "image/png".into(),
+                size: 1,
+            },
+        };
+        let mut doc = sample();
+        let router = doc.entities.iter_mut().find(|e| e.id == "router").unwrap();
+        router.ports = vec![Port {
+            properties: vec![text("VLAN", "20"), file('a')],
+            ..port("3", 3, 1, None)
+        }];
+        let ethernet = doc
+            .connections
+            .iter_mut()
+            .find(|c| c.id == "ethernet")
+            .unwrap();
+        ethernet.properties = vec![text("Cable label", "C-17"), file('b')];
+        validate(&doc).unwrap();
+        // Every attachment counts as referenced, wherever its detail lives.
+        let ids: BTreeSet<_> = doc.attachments().collect();
+        assert_eq!(
+            ids,
+            ["a".repeat(64), "b".repeat(64)]
+                .iter()
+                .map(String::as_str)
+                .collect()
+        );
+        // Port details are validated like any other.
+        let mut bad = doc.clone();
+        bad.entities
+            .iter_mut()
+            .find(|e| e.id == "router")
+            .unwrap()
+            .ports[0]
+            .properties[0]
+            .key = String::new();
+        assert!(validate(&bad).is_err());
+        let mut bad = doc.clone();
+        bad.connections[2].properties[0].key = String::new();
+        assert!(validate(&bad).is_err());
+        // A thing matches through its ports' details...
+        let cond = |key: &str, op: Op, value: &str| Filter {
+            conditions: vec![Condition {
+                key: key.into(),
+                op,
+                value: value.into(),
+            }],
+            any: false,
+        };
+        assert_eq!(
+            filter_seeds(&doc, &cond("VLAN", Op::Equals, "20")),
+            ["router".to_string()].into()
+        );
+        // ...and a matching connection brings its endpoints.
+        let seeds = filter_seeds(&doc, &cond("Cable label", Op::Contains, "c-17"));
+        assert_eq!(
+            seeds,
+            ["router", "tv", "desk", "ha"].map(String::from).into()
+        );
+        assert!(matches_connection(
+            &doc.connections[2],
+            &cond("@kind", Op::Equals, "network")
+        ));
+        assert!(filter_seeds(&doc, &cond("@any", Op::Contains, "c-17")).contains("desk"));
     }
     #[test]
     fn a_focus_keeps_its_own_arrangement() {

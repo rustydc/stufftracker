@@ -44,6 +44,8 @@ interface StuffTrackerV1 {
   uploadAttachment @17 (file :Blob) -> (attachment :FileRef);
   # Fetch an attachment's bytes, MIME type and file name by its ID (FileRef.attachment). Requires read.
   getAttachment @18 (id :Text) -> (file :Blob);
+  # Set a connection's details (a cable's label, length or colour, its conduit, a circuit's wire gauge), replacing them all. putConnection keeps the stored details. Requires write and the current revision.
+  putConnectionProperties @19 (expectedRevision :UInt64, connection :Text, properties :List(Property)) -> (revision :UInt64);
 }
 struct Entity {
   id @0 :Text;
@@ -112,6 +114,8 @@ struct Port {
   amps @7 :UInt16;
   # Ground-fault / arc-fault protection built into the breaker; keep it out of label.
   protection @8 :Protection;
+  # Details of this port: a breaker's wire gauge or directory label, a switch port's VLAN or patch position, a terminal's wire colour, the IP address of a multi-interface device's own port. Part of the port, so putPorts writes them.
+  properties @9 :List(Property);
 }
 enum Protection {
   # None recorded.
@@ -140,6 +144,8 @@ struct Connection {
   name @1 :Text;
   layer @2 :Text;
   endpoints @3 :List(Endpoint);
+  # Details of the link itself (cable label, length, colour, conduit, wire gauge). Read-only here: putConnection keeps the stored details; change them with putConnectionProperties.
+  properties @4 :List(Property);
 }
 struct Layer { id @0 :Text; name @1 :Text; color @2 :Text; }
 struct Document {

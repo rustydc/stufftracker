@@ -21,6 +21,7 @@ type Port = {
   /** Breaker or circuit rating, as printed on the handle. */
   amps?: number;
   protection?: "gfci" | "afci" | "dual";
+  properties?: Property[];
 };
 type Entity = {
   id: string;
@@ -50,6 +51,7 @@ type Connection = {
   name: string;
   layer: string;
   endpoints: Endpoint[];
+  properties?: Property[];
 };
 type Direction = "both" | "upstream" | "downstream";
 type Op = "contains" | "equals" | "exists" | "missing";
@@ -240,9 +242,14 @@ function renderFilterPanel() {
   const f = filterDraft;
   // Every detail key in the inventory, most used first.
   const counts = new Map<string, number>();
-  for (const e of doc.entities)
-    for (const p of e.properties || [])
-      counts.set(p.key, (counts.get(p.key) || 0) + 1);
+  const everyDetail = [
+    ...doc.entities.flatMap((e) => [
+      ...(e.properties || []),
+      ...(e.ports || []).flatMap((p) => p.properties || []),
+    ]),
+    ...doc.connections.flatMap((c) => c.properties || []),
+  ];
+  for (const p of everyDetail) counts.set(p.key, (counts.get(p.key) || 0) + 1);
   const keys = [...counts]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .map(([k]) => k);
@@ -443,7 +450,8 @@ function renderScene() {
       const path = branch.points
         .map((p, i) => `${i ? "L" : "M"}${p.x},${p.y}`)
         .join(" ");
-      content += `<path class="route" stroke="${esc(layer.color)}" d="${path}" ${branch.role === "target" ? `marker-start="url(#arrow-${esc(layer.id)})"` : ""}><title>${esc(b.connections.map((id) => doc.connections.find((c) => c.id === id)!.name).join(", "))}</title></path>`;
+      // A wide invisible stroke makes the wire easy to click.
+      content += `<path class="route-hit" d="${path}" data-connections="${esc(b.connections.join(" "))}"/><path class="route ${selectedConnection && b.connections.includes(selectedConnection) ? "selected-wire" : ""}" data-connections="${esc(b.connections.join(" "))}" stroke="${esc(layer.color)}" d="${path}" ${branch.role === "target" ? `marker-start="url(#arrow-${esc(layer.id)})"` : ""}><title>${esc(b.connections.map((id) => doc.connections.find((c) => c.id === id)!.name).join(", "))}</title></path>`;
     }
     for (const point of b.junctions) {
       content += `<circle class="junction" data-connection="${esc(b.connections[0])}" cx="${point.x}" cy="${point.y}" r="4" fill="${esc(layer.color)}"><title>${esc(b.connections.map((id) => doc.connections.find((c) => c.id === id)!.name).join(", "))} · branch point</title></circle>`;
@@ -595,10 +603,16 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
     }
     const names = fed(b.id);
     const r = rating(portOf(b.id));
+    const extra = (portOf(b.id)?.properties || [])
+      .map(
+        (d) =>
+          `\n${d.key}: ${d.type === "text" ? d.text : d.type === "link" ? d.title || d.url : d.name}`,
+      )
+      .join("");
     body += slot(
       b,
       names.length ? "used" : "spare",
-      `${b.position ? b.position + " · " : ""}${b.id}${r ? " · " + r : ""}${b.label ? " · " + b.label : ""}${names.length ? "\n→ " + names.join(", ") : "\nNothing connected"}`,
+      `${b.position ? b.position + " · " : ""}${b.id}${r ? " · " + r : ""}${b.label ? " · " + b.label : ""}${names.length ? "\n→ " + names.join(", ") : "\nNothing connected"}${extra}`,
     );
   }
   if (f.unassigned)
@@ -619,7 +633,10 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
 const searchText = (e: Entity) =>
   [
     e.name,
-    ...(e.properties || []).flatMap((p) => [
+    ...[
+      ...(e.properties || []),
+      ...(e.ports || []).flatMap((p) => p.properties || []),
+    ].flatMap((p) => [
       p.key,
       p.type === "text"
         ? p.text
@@ -726,7 +743,7 @@ function scheduleHtml(e: Entity) {
   return `<div class="schedule"><div class="schedule-head"><h3>${e.faceplate === "panel" ? "Panel schedule" : "Ports"}</h3><button type="button" class="print-schedule">Print</button></div><table><thead><tr><th>${e.faceplate === "panel" ? "Space" : "#"}</th><th>Port</th><th>Connected to</th></tr></thead><tbody>${rows
     .map(
       (r) =>
-        `<tr><td>${esc(r.position)}</td><td><b>${esc(r.port.id)}</b>${ratingHtml(r.port)}${r.port.label ? `<small>${esc(r.port.label)}</small>` : ""}</td><td>${cell(r.connections)}</td></tr>`,
+        `<tr><td>${esc(r.position)}</td><td><button class="link-button port-id" data-select-port="${portRef(e.id, r.port.id)}"><b>${esc(r.port.id)}</b></button>${ratingHtml(r.port)}${r.port.label ? `<small>${esc(r.port.label)}</small>` : ""}</td><td>${cell(r.connections)}</td></tr>`,
     )
     .join(
       "",
@@ -758,7 +775,7 @@ function connectionsHtml(e: Entity, assign: boolean) {
           : ep.port
             ? `<small>@${esc(ep.port)}</small>`
             : "";
-      return `<div class="conn"><span class="swatch" style="background:${esc(layer.color)}"></span><div><div>${arrow} ${others}</div><small>${esc(c.name)}</small></div>${select}</div>`;
+      return `<div class="conn"><span class="swatch" style="background:${esc(layer.color)}"></span><div><button class="link-button" data-select-connection="${esc(c.id)}">${arrow} ${others}</button><small>${esc(c.name)}</small></div>${select}</div>`;
     })
     .join("")}</div>`;
 }
@@ -778,7 +795,158 @@ function portEditorHtml(e: Entity) {
     )}</div><div class="button-row"><button type="button" id="add-port">＋ Port</button><button type="button" id="number-ports" title="Add numbered ports up to a count">＋ Numbered…</button><button>Apply ports</button></div></form></details>`;
 }
 let portEditorOpen = false;
+// Besides the selected thing, a wire (connection) or one of a thing's ports
+// can be selected for inspection.
+let selectedConnection: string | null = null;
+let selectedPort: { entity: string; port: string } | null = null;
+function selectEntity(id: string) {
+  selected = id;
+  selectedConnection = null;
+  selectedPort = null;
+}
+// Buttons that switch what is inspected: a thing, a connection, a port.
+function wireSelectors(root: HTMLElement, sheet = false) {
+  root.querySelectorAll<HTMLElement>("[data-select-entity]").forEach(
+    (b) =>
+      (b.onclick = () => {
+        selectEntity(b.dataset.selectEntity!);
+        if (sheet) openSheet({ kind: "entity", id: selected });
+        render();
+      }),
+  );
+  root.querySelectorAll<HTMLElement>("[data-select-connection]").forEach(
+    (b) =>
+      (b.onclick = (ev) => {
+        ev.preventDefault();
+        selectedConnection = b.dataset.selectConnection!;
+        selectedPort = null;
+        if (sheet) openSheet({ kind: "connection", id: selectedConnection });
+        renderScene();
+        renderInspector();
+      }),
+  );
+  root.querySelectorAll<HTMLElement>("[data-select-port]").forEach(
+    (b) =>
+      (b.onclick = (ev) => {
+        ev.preventDefault();
+        const [entity, ...rest] = b.dataset.selectPort!.split(":");
+        selected = entity;
+        selectedConnection = null;
+        selectedPort = { entity, port: rest.join(":") };
+        if (sheet)
+          openSheet({ kind: "port", id: entity, port: selectedPort.port });
+        renderInspector();
+      }),
+  );
+}
+const portRef = (e: string, port: string) => `${esc(e)}:${esc(port)}`;
+const roleArrow = (r: Role) =>
+  r === "source" ? "→" : r === "target" ? "←" : "↔";
+// A connection: its layer, ends (with ports), the other links sharing its
+// wire, and its details.
+function connectionHtml(c: Connection, editable: boolean) {
+  const layer = doc.layers.find((l) => l.id === c.layer)!;
+  const sharing = current.bundles.find((b) => b.connections.includes(c.id));
+  const others = (sharing?.connections || []).filter((id) => id !== c.id);
+  return `<span class="eyebrow"><span class="swatch" style="background:${esc(layer.color)}"></span>CONNECTION · ${esc(layer.name.toUpperCase())}</span><h2>${esc(c.name)}</h2><div class="ends"><h3>Ends</h3>${c.endpoints
+    .map((ep) => {
+      const e = doc.entities.find((x) => x.id === ep.entity)!;
+      return `<div class="end"><span class="role" title="${ep.role}">${{ source: "from", target: "to", peer: "with" }[ep.role]}</span><button class="link-button" data-select-entity="${esc(e.id)}">${esc(e.name)}</button>${ep.port ? `<button class="port-chip" data-select-port="${portRef(e.id, ep.port)}" title="Port ${esc(ep.port)}">${esc(ep.port)}</button>` : ""}</div>`;
+    })
+    .join(
+      "",
+    )}</div>${others.length ? `<div class="sharing"><h3>Same wire</h3>${others.map((id) => `<button class="link-button" data-select-connection="${esc(id)}">${esc(doc.connections.find((x) => x.id === id)!.name)}</button>`).join("")}</div>` : ""}<div class="focus-actions"><button data-focus-connection="${esc(c.id)}">Show only this</button></div>${detailsHtml(c)}${
+    editable
+      ? `<form id="connection-form"><label class="field">Name<input name="name" value="${esc(c.name)}" required maxlength="200"></label><label class="field">Layer<select name="layer">${doc.layers.map((l) => `<option value="${esc(l.id)}" ${l.id === c.layer ? "selected" : ""}>${esc(l.name)}</option>`).join("")}</select></label><div class="button-row"><button>Apply</button><button type="button" id="delete-connection" class="danger">Delete</button></div></form>${detailsEditorHtml(connectionTarget(c))}`
+      : ""
+  }`;
+}
+// A port: where it is, its rating, what it connects to, and its details.
+function portHtml(e: Entity, p: Port, editable: boolean) {
+  const mine = doc.connections.filter((c) =>
+    c.endpoints.some((ep) => ep.entity === e.id && ep.port === p.id),
+  );
+  const facts = [
+    p.main
+      ? "Supply"
+      : spaces(e, p)
+        ? `${e.faceplate === "panel" ? "Space" : "Position"} ${spaces(e, p)}`
+        : "",
+    ratingText(p),
+  ].filter(Boolean);
+  return `<span class="eyebrow">PORT · <button class="link-button" data-select-entity="${esc(e.id)}">${esc(e.name.toUpperCase())}</button></span><h2>${esc(p.id)}${p.label ? ` <small>${esc(p.label)}</small>` : ""}</h2>${facts.length ? `<p class="muted">${esc(facts.join(" · "))}</p>` : ""}<div class="conn-list"><h3>Connections</h3>${
+    mine.length
+      ? mine
+          .map((c) => {
+            const layer = doc.layers.find((l) => l.id === c.layer)!;
+            const to = c.endpoints
+              .filter((ep) => ep.entity !== e.id)
+              .map((ep) => esc(nameOf(ep.entity)))
+              .join(", ");
+            return `<div class="conn"><span class="swatch" style="background:${esc(layer.color)}"></span><div><button class="link-button" data-select-connection="${esc(c.id)}">${roleArrow(c.endpoints.find((ep) => ep.entity === e.id)!.role)} ${to}</button><small>${esc(c.name)}</small></div><span></span></div>`;
+          })
+          .join("")
+      : '<p class="muted">Nothing connected</p>'
+  }</div>${detailsHtml(p)}${editable ? detailsEditorHtml(portTarget(e, p)) : ""}`;
+}
+function renderConnectionInspector(): boolean {
+  const c = doc.connections.find((c) => c.id === selectedConnection);
+  if (!c) return false;
+  const root = $("inspector");
+  root.innerHTML = connectionHtml(c, writable);
+  wireSelectors(root);
+  wireDetailFilters(root);
+  root.querySelector<HTMLButtonElement>("[data-focus-connection]")!.onclick =
+    () =>
+      setFocus({
+        entities: c.endpoints.map((ep) => ep.entity),
+        hops: 0,
+        direction: "both",
+      });
+  if (writable) {
+    wireDetailsEditor(connectionTarget(c));
+    const form = $<HTMLFormElement>("connection-form");
+    form.onsubmit = (ev) => {
+      ev.preventDefault();
+      const f = new FormData(form);
+      const name = String(f.get("name")).trim();
+      if (!name) return status("A connection needs a name", true);
+      tryEdit((d) => {
+        const x = d.connections.find((x) => x.id === c.id)!;
+        x.name = name;
+        x.layer = String(f.get("layer"));
+      });
+    };
+    $("delete-connection").onclick = () => {
+      if (!confirm(`Delete the connection “${c.name}”?`)) return;
+      selectedConnection = null;
+      tryEdit((d) => {
+        d.connections = d.connections.filter((x) => x.id !== c.id);
+      });
+    };
+  }
+  return true;
+}
+function renderPortInspector(): boolean {
+  const e = doc.entities.find((e) => e.id === selectedPort?.entity);
+  const p = e?.ports?.find((p) => p.id === selectedPort?.port);
+  if (!e || !p) return false;
+  const root = $("inspector");
+  root.innerHTML = portHtml(e, p, writable);
+  wireSelectors(root);
+  wireDetailFilters(root);
+  if (writable) wireDetailsEditor(portTarget(e, p));
+  return true;
+}
 function renderInspector() {
+  if (selectedConnection) {
+    if (renderConnectionInspector()) return;
+    selectedConnection = null;
+  }
+  if (selectedPort) {
+    if (renderPortInspector()) return;
+    selectedPort = null;
+  }
   const e = doc.entities.find((e) => e.id === selected);
   if (!e) {
     $("inspector").innerHTML =
@@ -818,7 +986,7 @@ function renderInspector() {
             )
             .join(
               "",
-            )}</select></label><div class="button-row"><button>Apply</button><button type="button" id="delete-entity" class="danger">Delete${descendants.size > 1 ? ` (${descendants.size})` : ""}</button></div></form>${detailsEditorHtml(e)}${leaf ? portEditorHtml(e) : ""}<form id="connect-form" class="connect-form"><h3>Connect this thing</h3><label class="field">Connection name<input name="name" required placeholder="e.g. Office power"></label><label class="field">Layer<select name="layer">${doc.layers.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("")}</select></label><label class="field">Other endpoints<select name="targets" multiple required size="4">${doc.entities
+            )}</select></label><div class="button-row"><button>Apply</button><button type="button" id="delete-entity" class="danger">Delete${descendants.size > 1 ? ` (${descendants.size})` : ""}</button></div></form>${detailsEditorHtml(entityTarget(e))}${leaf ? portEditorHtml(e) : ""}<form id="connect-form" class="connect-form"><h3>Connect this thing</h3><label class="field">Connection name<input name="name" required placeholder="e.g. Office power"></label><label class="field">Layer<select name="layer">${doc.layers.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("")}</select></label><label class="field">Other endpoints<select name="targets" multiple required size="4">${doc.entities
             .filter((n) => n.id !== e.id)
             .map((n) => `<option value="${esc(n.id)}">${esc(n.name)}</option>`)
             .join(
@@ -877,7 +1045,8 @@ function renderInspector() {
       markDirty();
     };
   wireEntityActions($("inspector"), e);
-  if (writable) wireDetailsEditor(e);
+  if (writable) wireDetailsEditor(entityTarget(e));
+  wireSelectors($("inspector"));
   $("inspector")
     .querySelectorAll<HTMLSelectElement>("[data-assign]")
     .forEach(
@@ -1006,7 +1175,7 @@ const sizeText = (n: number) =>
     : n < 1 << 20
       ? `${Math.round(n / 1024)} KB`
       : `${(n / (1 << 20)).toFixed(1)} MB`;
-function detailsHtml(e: Entity) {
+function detailsHtml(e: { properties?: Property[] }) {
   if (!e.properties?.length) return "";
   const value = (p: Property) => {
     if (p.type === "text")
@@ -1029,14 +1198,49 @@ function detailsHtml(e: Entity) {
     .join("")}</dl></div>`;
 }
 // Details are drafted in the editor until applied, like ports.
-let draftDetails: { entity: string; rows: Property[] } | null = null;
+// What a details editor edits: a thing, a connection, or a port.
+type DetailTarget = {
+  key: string;
+  props?: Property[];
+  apply: (d: DocumentData, props?: Property[]) => void;
+};
+const entityTarget = (e: Entity): DetailTarget => ({
+  key: `e:${e.id}`,
+  props: e.properties,
+  apply: (d, props) => {
+    const x = d.entities.find((x) => x.id === e.id)!;
+    if (props) x.properties = props;
+    else delete x.properties;
+  },
+});
+const connectionTarget = (c: Connection): DetailTarget => ({
+  key: `c:${c.id}`,
+  props: c.properties,
+  apply: (d, props) => {
+    const x = d.connections.find((x) => x.id === c.id)!;
+    if (props) x.properties = props;
+    else delete x.properties;
+  },
+});
+const portTarget = (e: Entity, port: Port): DetailTarget => ({
+  key: `p:${e.id}:${port.id}`,
+  props: port.properties,
+  apply: (d, props) => {
+    const x = d.entities
+      .find((x) => x.id === e.id)!
+      .ports!.find((p) => p.id === port.id)!;
+    if (props) x.properties = props;
+    else delete x.properties;
+  },
+});
+let draftDetails: { key: string; rows: Property[] } | null = null;
 let detailsEditorOpen = false;
-function detailsEditorHtml(e: Entity) {
+function detailsEditorHtml(t: DetailTarget) {
   const rows =
-    draftDetails?.entity === e.id
+    draftDetails?.key === t.key
       ? draftDetails.rows
-      : structuredClone(e.properties || []);
-  draftDetails = { entity: e.id, rows };
+      : structuredClone(t.props || []);
+  draftDetails = { key: t.key, rows };
   const valueInputs = (p: Property, i: number) =>
     p.type === "text"
       ? `<input data-detail="${i}" data-field="text" value="${esc(p.text)}" maxlength="4000" placeholder="Value" aria-label="Value">`
@@ -1052,7 +1256,7 @@ function detailsEditorHtml(e: Entity) {
       "",
     )}</div><div class="button-row"><button type="button" id="add-detail">＋ Detail</button><button type="button" id="apply-details">Apply details</button></div></details>`;
 }
-function wireDetailsEditor(e: Entity) {
+function wireDetailsEditor(t: DetailTarget) {
   const root = document.querySelector<HTMLDetailsElement>(
     "#inspector .details-editor",
   );
@@ -1125,13 +1329,7 @@ function wireDetailsEditor(e: Entity) {
     const keep = rows
       .map((p) => ({ ...p, key: p.key.trim() }))
       .filter((p) => p.key && !(p.type === "file" && !p.attachment));
-    if (
-      tryEdit((d) => {
-        const target = d.entities.find((x) => x.id === e.id)!;
-        if (keep.length) target.properties = keep;
-        else delete target.properties;
-      })
-    ) {
+    if (tryEdit((d) => t.apply(d, keep.length ? keep : undefined))) {
       draftDetails = null;
       status("Details applied; save to keep them");
     }
@@ -1174,6 +1372,9 @@ function wireEntityActions(root: HTMLElement, e: Entity) {
     };
   const print = root.querySelector<HTMLButtonElement>(".print-schedule");
   if (print) print.onclick = () => printSchedule(e);
+  wireDetailFilters(root);
+}
+function wireDetailFilters(root: HTMLElement) {
   root.querySelectorAll<HTMLButtonElement>("[data-same-key]").forEach(
     (b) =>
       (b.onclick = () => {
@@ -1200,10 +1401,61 @@ function wireEntityActions(root: HTMLElement, e: Entity) {
   );
 }
 // Phones have no inspector column: tapping a thing opens this sheet instead.
+type SheetTarget =
+  | { kind: "entity"; id: string }
+  | { kind: "connection"; id: string }
+  | { kind: "port"; id: string; port: string };
+let sheetTarget: SheetTarget | null = null;
+// The entity a sheet shows, for the code paths that only handle things.
 let sheetId: string | null = null;
+function openSheet(t: SheetTarget) {
+  sheetTarget = t;
+  sheetId = t.kind === "entity" ? t.id : null;
+  renderSheet();
+}
 const narrow = () => matchMedia("(max-width: 800px)").matches;
 function renderSheet() {
   const sheet = $("sheet");
+  if (!sheetId && sheetTarget?.kind === "entity") sheetTarget = null;
+  const t = sheetTarget;
+  const close = `<button class="sheet-close" aria-label="Close">✕</button>`;
+  const wireClose = () =>
+    (sheet.querySelector<HTMLButtonElement>(".sheet-close")!.onclick = () => {
+      sheetId = null;
+      sheetTarget = null;
+      renderSheet();
+    });
+  if (t?.kind === "connection") {
+    const c = doc.connections.find((c) => c.id === t.id);
+    sheet.hidden = !c;
+    if (!c) return;
+    sheet.innerHTML = `<div class="sheet-head"><div>${connectionHtml(c, false)}</div>${close}</div>`;
+    wireClose();
+    wireSelectors(sheet, true);
+    wireDetailFilters(sheet);
+    sheet.querySelector<HTMLButtonElement>("[data-focus-connection]")!.onclick =
+      () => {
+        sheetTarget = null;
+        renderSheet();
+        setFocus({
+          entities: c.endpoints.map((ep) => ep.entity),
+          hops: 0,
+          direction: "both",
+        });
+      };
+    return;
+  }
+  if (t?.kind === "port") {
+    const e = doc.entities.find((x) => x.id === t.id);
+    const p = e?.ports?.find((p) => p.id === t.port);
+    sheet.hidden = !p;
+    if (!e || !p) return;
+    sheet.innerHTML = `<div class="sheet-head"><div>${portHtml(e, p, false)}</div>${close}</div>`;
+    wireClose();
+    wireSelectors(sheet, true);
+    wireDetailFilters(sheet);
+    return;
+  }
   const e = sheetId ? doc.entities.find((x) => x.id === sheetId) : undefined;
   sheet.hidden = !e;
   if (!e) return;
@@ -1217,6 +1469,7 @@ function renderSheet() {
     renderSheet();
   };
   wireEntityActions(sheet, e);
+  wireSelectors(sheet, true);
 }
 // Select mode: on touch there is no shift key, so taps pick and a drag lassos.
 let selectMode = false;
@@ -1509,9 +1762,25 @@ const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 function endPointer(ev: PointerEvent) {
   if (!pointers.delete(ev.pointerId)) return;
   finishLasso();
-  if (tap && !pointers.size && ev.type === "pointerup" && narrow()) {
-    sheetId = tap.id;
-    renderSheet();
+  // A tap on a faceplate's port or on a wire inspects that port or wire.
+  if (tap && !pointers.size && ev.type === "pointerup") {
+    if (tap.port) selectedPort = { entity: tap.id, port: tap.port };
+    if (tap.connection) {
+      selectedConnection = tap.connection;
+      selectedPort = null;
+    }
+    if (tap.port || tap.connection) {
+      renderScene();
+      renderInspector();
+    }
+    if (narrow())
+      openSheet(
+        tap.connection
+          ? { kind: "connection", id: tap.connection }
+          : tap.port
+            ? { kind: "port", id: tap.id, port: tap.port }
+            : { kind: "entity", id: tap.id },
+      );
   }
   tap = null;
   // Land the drag where the pointer let go.
@@ -1557,9 +1826,22 @@ svg.addEventListener("pointerdown", (ev) => {
     } else lasso = { start: pointerPoint(ev), end: pointerPoint(ev) };
     return;
   }
-  tap = id ? { id, at: pointerPoint(ev) } : null;
+  const wire = target.closest("[data-connections]");
+  const slot = target.closest("[data-port]");
+  tap =
+    id || wire
+      ? {
+          id: id || "",
+          at: pointerPoint(ev),
+          port: id && slot ? slot.getAttribute("data-port")! : undefined,
+          connection:
+            !id && wire
+              ? wire.getAttribute("data-connections")!.split(" ")[0]
+              : undefined,
+        }
+      : null;
   if (id) {
-    selected = id;
+    selectEntity(id);
     renderTree();
     renderInspector();
     document
@@ -1582,7 +1864,8 @@ svg.addEventListener("pointerdown", (ev) => {
 });
 let lasso: { start: Point; end: Point } | null = null;
 // A press on a thing that ends where it began (no drag) is a tap.
-let tap: { id: string; at: Point } | null = null;
+let tap: { id: string; at: Point; port?: string; connection?: string } | null =
+  null;
 function drawLasso() {
   const el = document.getElementById("lasso")!;
   if (!lasso) return el.setAttribute("visibility", "hidden");
@@ -1692,7 +1975,7 @@ $("tree").onclick = (ev) => {
   }
   const row = t.closest("[data-select]");
   if (row) {
-    selected = row.getAttribute("data-select")!;
+    selectEntity(row.getAttribute("data-select")!);
     render();
   }
 };

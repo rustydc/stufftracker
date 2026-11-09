@@ -25,6 +25,7 @@ another session with broader access was opened.
 | `putPorts`                                               | Set a thing's physical layout: faceplate kind and ports             |
 | `putProperties`                                          | Set a thing's details: text, link and file key/value properties     |
 | `uploadAttachment`, `getAttachment`                      | Store a file (photo, manual) as a Darude `Blob`, or fetch one       |
+| `putConnectionProperties`                                | Set a connection's details: cable label, length, gauge              |
 
 Entity and connection listings accept `offset` and `limit` (default 100, maximum
 200), and return `nextOffset`, `hasMore`, and the inventory `revision`. Entity
@@ -206,6 +207,17 @@ same shape the agent loop shows models as images and documents. Store one with
 }
 ```
 
+Ports and connections carry `properties` too, in the same shape. A port's
+details (a breaker's wire gauge or directory label, a switch port's VLAN or
+patch position, a terminal's wire colour, the IP address of a multi-interface
+device's own port) are part of the port, so `putPorts` writes them along with
+the rest of the port list. A connection's details (a cable's label, length or
+colour, its conduit, a circuit's wire gauge) are set with
+`putConnectionProperties`; `putConnection` keeps them, like `putEntity` keeps
+an entity's. Keep a breaker's rating and GFCI/AFCI in `amps` and `protection`,
+which the faceplate draws, and a device's own IP on the device unless it has
+several interfaces.
+
 Identical bytes return the same attachment (its ID is their SHA-256);
 `uploadAttachment` accepts at most 25 MiB and needs write. `getAttachment`
 returns the stored `Blob` and needs read. A detail may only name an uploaded
@@ -249,7 +261,9 @@ A focus may also carry a `filter`, and then starts from every thing it matches
 which must match (or any, with `"any": true`). `key` is a detail key (matched
 case-insensitively), or `@name`, `@kind` or `@any` (name, kind and every
 detail); `op` is `contains` or `equals` (case-insensitive), or `exists` /
-`missing` for a detail key. Text values compare their text, links their URL
+`missing` for a detail key. A thing also matches through its ports' details,
+and a connection matching (by its name, its layer as `@kind`, or its details)
+brings its endpoints. Text values compare their text, links their URL
 and title, files their name and MIME type. For example, every networked
 thing without a model recorded:
 

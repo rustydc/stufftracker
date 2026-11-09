@@ -138,12 +138,7 @@ fn store_snapshot(a: &App, s: Snapshot) -> Result<u64, Error> {
     }
     // Details may only name stored attachments; unreferenced uploads are
     // dropped once a day old (time to attach them after uploading).
-    let referenced: std::collections::BTreeSet<&str> = s
-        .document
-        .entities
-        .iter()
-        .flat_map(|e| e.attachments())
-        .collect();
+    let referenced: std::collections::BTreeSet<&str> = s.document.attachments().collect();
     for id in &referenced {
         let known: bool = tx
             .query_row("SELECT count(*) FROM attachments WHERE id=?1", [id], |r| {

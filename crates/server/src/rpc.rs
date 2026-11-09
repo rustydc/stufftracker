@@ -160,6 +160,7 @@ fn ports_read(list: capnp::struct_list::Reader<'_, wire::port::Owned>) -> capnp:
                     .map(text)
                     .collect::<capnp::Result<_>>()?,
                 main: p.get_main(),
+                properties: properties_read(p.get_properties()?)?,
                 amps: Some(p.get_amps() as u32).filter(|a| *a > 0),
                 protection: match p
                     .get_protection()
@@ -183,6 +184,10 @@ fn ports_write(mut list: capnp::struct_list::Builder<'_, wire::port::Owned>, por
         b.set_poles(p.poles.unwrap_or(1).min(255) as u8);
         b.set_half(p.half.as_deref().unwrap_or(""));
         b.set_main(p.main);
+        properties_write(
+            b.reborrow().init_properties(p.properties.len() as u32),
+            &p.properties,
+        );
         b.set_amps(p.amps.unwrap_or(0).min(u16::MAX as u32) as u16);
         b.set_protection(match p.protection {
             None => wire::Protection::None,
@@ -236,12 +241,17 @@ fn connection_read(r: wire::connection::Reader<'_>) -> capnp::Result<Connection>
                 })
             })
             .collect::<capnp::Result<_>>()?,
+        properties: properties_read(r.get_properties()?)?,
     })
 }
 fn connection_write(mut b: wire::connection::Builder<'_>, c: &Connection) {
     b.set_id(&c.id);
     b.set_name(&c.name);
     b.set_layer(&c.layer);
+    properties_write(
+        b.reborrow().init_properties(c.properties.len() as u32),
+        &c.properties,
+    );
     let mut eps = b.init_endpoints(c.endpoints.len() as u32);
     for (i, ep) in c.endpoints.iter().enumerate() {
         let mut b = eps.reborrow().get(i as u32);
@@ -485,11 +495,14 @@ impl api::Server for Api {
         finish((|| {
             self.check(true)?;
             let p = params.get()?;
-            let item = connection_read(p.get_connection()?)?;
+            let mut item = connection_read(p.get_connection()?)?;
             let revision = self.mutate(p.get_expected_revision(), move |d| {
                 if let Some(old) = d.connections.iter_mut().find(|e| e.id == item.id) {
+                    // Details belong to putConnectionProperties.
+                    item.properties = std::mem::take(&mut old.properties);
                     *old = item;
                 } else {
+                    item.properties.clear();
                     d.connections.push(item);
                 }
                 Ok(())
@@ -706,6 +719,28 @@ impl api::Server for Api {
             Ok(())
         })())
     }
+    fn put_connection_properties(
+        &mut self,
+        params: api::PutConnectionPropertiesParams,
+        mut results: api::PutConnectionPropertiesResults,
+    ) -> Promise<(), capnp::Error> {
+        finish((|| {
+            self.check(true)?;
+            let p = params.get()?;
+            let id = text(p.get_connection())?;
+            let properties = properties_read(p.get_properties()?)?;
+            let revision = self.mutate(p.get_expected_revision(), move |d| {
+                d.connections
+                    .iter_mut()
+                    .find(|c| c.id == id)
+                    .ok_or_else(|| capnp::Error::failed("404: Connection not found".into()))?
+                    .properties = properties;
+                Ok(())
+            })?;
+            results.get().set_revision(revision);
+            Ok(())
+        })())
+    }
     fn put_properties(
         &mut self,
         params: api::PutPropertiesParams,
@@ -848,6 +883,13 @@ mod tests {
         assert!(c.delete_view_request().send().promise.await.is_err());
         assert!(c.put_ports_request().send().promise.await.is_err());
         assert!(c.put_properties_request().send().promise.await.is_err());
+        assert!(
+            c.put_connection_properties_request()
+                .send()
+                .promise
+                .await
+                .is_err()
+        );
         assert!(c.upload_attachment_request().send().promise.await.is_err());
         assert_eq!(load_snapshot(&app).unwrap().revision, 1);
         for rights in [["write"], ["owner"]] {
@@ -860,6 +902,63 @@ mod tests {
                     .is_ok()
             );
         }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn connection_details_survive_put_connection() {
+        let app = app();
+        let c = client(&app, &["read", "write"]);
+        let details = vec![Property {
+            key: "Cable label".into(),
+            value: PropertyValue::Text {
+                text: "C-17".into(),
+            },
+        }];
+        let mut req = c.put_connection_properties_request();
+        req.get().set_expected_revision(1);
+        req.get().set_connection("ethernet");
+        properties_write(req.get().init_properties(1), &details);
+        req.send().promise.await.unwrap();
+        // Rename it with putConnection, which carries no details.
+        let mut ethernet = load_snapshot(&app)
+            .unwrap()
+            .document
+            .connections
+            .into_iter()
+            .find(|c| c.id == "ethernet")
+            .unwrap();
+        assert_eq!(ethernet.properties, details);
+        ethernet.name = "Cat6 run".into();
+        ethernet.properties.clear();
+        let mut req = c.put_connection_request();
+        req.get().set_expected_revision(2);
+        connection_write(req.get().init_connection(), &ethernet);
+        req.send().promise.await.unwrap();
+        let mut req = c.list_connections_request();
+        req.get().set_entity("router");
+        let list = req.send().promise.await.unwrap();
+        let got: Vec<Connection> = list
+            .get()
+            .unwrap()
+            .get_connections()
+            .unwrap()
+            .iter()
+            .map(|r| connection_read(r).unwrap())
+            .collect();
+        let e = got.iter().find(|c| c.id == "ethernet").unwrap();
+        assert_eq!((e.name.as_str(), &e.properties), ("Cat6 run", &details));
+        // Unknown connection.
+        let mut req = c.put_connection_properties_request();
+        req.get().set_expected_revision(3);
+        req.get().set_connection("nope");
+        assert!(
+            req.send()
+                .promise
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("404")
+        );
     }
     #[tokio::test(flavor = "current_thread")]
     async fn details_and_blob_attachments() {
@@ -992,6 +1091,12 @@ mod tests {
                 main: false,
                 amps: Some(20),
                 protection: Some(Protection::Gfci),
+                properties: vec![Property {
+                    key: "Wire".into(),
+                    value: PropertyValue::Text {
+                        text: "12 AWG".into(),
+                    },
+                }],
             },
             Port {
                 id: "3/5".into(),
@@ -1003,6 +1108,7 @@ mod tests {
                 main: false,
                 amps: Some(30),
                 protection: None,
+                properties: Vec::new(),
             },
             Port {
                 id: "MAIN".into(),
@@ -1014,6 +1120,7 @@ mod tests {
                 main: true,
                 amps: Some(100),
                 protection: None,
+                properties: Vec::new(),
             },
         ];
         let mut req = c.put_ports_request();
@@ -1177,6 +1284,7 @@ mod tests {
         );
         req.send().promise.await.unwrap();
         let connection = Connection {
+            properties: Vec::new(),
             id: "test".into(),
             name: "Directed".into(),
             layer: "test".into(),
