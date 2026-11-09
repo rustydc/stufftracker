@@ -187,6 +187,268 @@ function setFocus(focus: Focus | null) {
 }
 const nameOf = (id: string) =>
   doc.entities.find((e) => e.id === id)?.name || id;
+// --- Live status: Home Assistant states and Outline titles -----------------
+// Fetched on their own, after drawing, so status never delays layout or
+// rendering; a slow or unwired bridge just means no status yet.
+type EntityStatus = {
+  state: string;
+  name: string;
+  changed: number;
+  attributes: Record<string, string | number | boolean>;
+};
+type LiveStatus = {
+  connected: boolean;
+  error?: string;
+  updated?: number;
+  entities?: Record<string, EntityStatus>;
+  areas?: Record<string, { name: string; entities: string[] }>;
+};
+type LiveDocuments = {
+  connected: boolean;
+  documents?: Record<string, { title?: string; url?: string; error?: string }>;
+};
+let liveStatus: LiveStatus | null = null;
+let liveDocuments: LiveDocuments | null = null;
+const isHa = (p: string) =>
+  p === "home_assistant" || p === "homeassistant" || p === "ha";
+type Tone = "on" | "off" | "alert" | "value" | "muted";
+// A state as people say it: "on 78%", "21.4 °C", "open", "unavailable".
+function formatState(
+  id: string,
+  s: EntityStatus,
+): { text: string; tone: Tone } {
+  const domain = id.split(".")[0];
+  const a = s.attributes || {};
+  const dc = String(a.device_class || "");
+  if (s.state === "unavailable" || s.state === "unknown")
+    return { text: s.state, tone: "muted" };
+  const onOff = (on: string, off: string, alert = false) =>
+    s.state === "on"
+      ? { text: on, tone: (alert ? "alert" : "on") as Tone }
+      : { text: off, tone: "off" as Tone };
+  switch (domain) {
+    case "light":
+      return s.state === "on" && typeof a.brightness === "number"
+        ? { text: `on ${Math.round((a.brightness / 255) * 100)}%`, tone: "on" }
+        : onOff("on", "off");
+    case "switch":
+    case "fan":
+    case "input_boolean":
+    case "automation":
+    case "siren":
+      return onOff("on", "off");
+    case "binary_sensor":
+      if (["door", "window", "garage_door", "opening"].includes(dc))
+        return onOff("open", "closed", true);
+      if (["motion", "occupancy", "presence"].includes(dc))
+        return onOff("motion", "clear");
+      if (
+        ["moisture", "smoke", "gas", "problem", "safety", "tamper"].includes(dc)
+      )
+        return onOff(dc === "moisture" ? "wet" : "alert", "ok", true);
+      if (dc === "connectivity") return onOff("connected", "disconnected");
+      if (dc === "battery") return onOff("low", "ok", true);
+      return onOff("on", "off");
+    case "sensor": {
+      const n = Number(s.state);
+      const unit = a.unit_of_measurement ? ` ${a.unit_of_measurement}` : "";
+      const v =
+        Number.isFinite(n) && s.state.trim() !== ""
+          ? Number.isInteger(n)
+            ? String(n)
+            : n.toFixed(1)
+          : s.state;
+      return { text: `${v}${unit}`, tone: "value" };
+    }
+    case "climate": {
+      const t = a.current_temperature;
+      return {
+        text: `${t !== undefined ? `${t}°` : s.state}${a.hvac_action ? ` ${a.hvac_action}` : ` ${s.state}`}`,
+        tone:
+          a.hvac_action === "heating" || a.hvac_action === "cooling"
+            ? "on"
+            : "value",
+      };
+    }
+    case "lock":
+      return { text: s.state, tone: s.state === "unlocked" ? "alert" : "off" };
+    case "cover":
+      return { text: s.state, tone: s.state === "open" ? "on" : "off" };
+    default:
+      return {
+        text: s.state.length > 16 ? s.state.slice(0, 15) + "…" : s.state,
+        tone: "value",
+      };
+  }
+}
+// A room linked to an area: its temperature, lights on, anything open.
+function areaSummary(areaId: string): { text: string; tone: Tone } | null {
+  const area = liveStatus?.areas?.[areaId];
+  const states = liveStatus?.entities;
+  if (!area || !states) return null;
+  const members = area.entities
+    .map((id) => [id, states[id]] as const)
+    .filter(([, s]) => s);
+  const parts: string[] = [];
+  const temp = members.find(
+    ([id, s]) =>
+      id.startsWith("sensor.") &&
+      s.attributes.device_class === "temperature" &&
+      Number.isFinite(Number(s.state)),
+  );
+  if (temp) parts.push(formatState(temp[0], temp[1]).text);
+  const lights = members.filter(([id]) => id.startsWith("light."));
+  const on = lights.filter(([, s]) => s.state === "on").length;
+  if (lights.length)
+    parts.push(on ? `${on} light${on === 1 ? "" : "s"} on` : "lights off");
+  const open = members.filter(([id, s]) => {
+    if (!id.startsWith("binary_sensor.")) return false;
+    return (
+      ["door", "window", "garage_door", "opening"].includes(
+        String(s.attributes.device_class),
+      ) && s.state === "on"
+    );
+  }).length;
+  if (open) parts.push(`${open} open`);
+  if (!parts.length) return { text: `${members.length} in HA`, tone: "muted" };
+  return {
+    text: parts.join(" · "),
+    tone: open ? "alert" : on ? "on" : "value",
+  };
+}
+// What a thing's card shows: its first linked entity's state, or its area's summary.
+function cardStatus(e: Entity): { text: string; tone: Tone } | null {
+  if (!liveStatus?.connected) return null;
+  for (const l of e.links.filter((l) => isHa(l.provider))) {
+    if (l.kind === "area") {
+      const a = areaSummary(l.external_id);
+      if (a) return a;
+    } else {
+      const st = liveStatus.entities?.[l.external_id];
+      if (st) return formatState(l.external_id, st);
+    }
+  }
+  return null;
+}
+// A status pill, right-aligned at (right, top) in the node's coordinates.
+function pillSvg(e: Entity, right: number, top: number, max: number) {
+  const st = cardStatus(e);
+  if (!st) return "";
+  const text = st.text.length > max ? st.text.slice(0, max - 1) + "…" : st.text;
+  const w = Math.max(24, text.length * 5.6 + 14);
+  return `<g class="ha-pill ${st.tone}" transform="translate(${right - w},${top})"><rect width="${w}" height="15" rx="7.5"/><text x="${w / 2}" y="8">${esc(text)}</text></g>`;
+}
+const ago = (ms: number) => {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  return s < 90
+    ? `${Math.round(s)}s ago`
+    : s < 5400
+      ? `${Math.round(s / 60)} min ago`
+      : s < 129600
+        ? `${Math.round(s / 3600)} h ago`
+        : `${Math.round(s / 86400)} d ago`;
+};
+// The inspector's live links: Home Assistant states and Outline documents.
+function liveLinksHtml(e: Entity) {
+  const links = e.links || [];
+  if (!links.length) return "";
+  const ha = links.filter((l) => isHa(l.provider));
+  const docs = links.filter((l) => l.provider === "outline");
+  const other = links.filter(
+    (l) => !isHa(l.provider) && l.provider !== "outline",
+  );
+  let html = "";
+  if (ha.length) {
+    const rows = ha.flatMap((l) => {
+      if (l.kind === "area") {
+        const area = liveStatus?.areas?.[l.external_id];
+        const sum = areaSummary(l.external_id);
+        return [
+          `<div class="ha-row"><div><b>${esc(area?.name || l.external_id)}</b><small>area</small></div>${sum ? `<span class="ha-state ${sum.tone}">${esc(sum.text)}</span>` : ""}</div>`,
+        ];
+      }
+      const st = liveStatus?.entities?.[l.external_id];
+      if (!st)
+        return [
+          `<div class="ha-row"><div><b>${esc(l.external_id)}</b><small>${liveStatus?.connected ? "not reported" : ""}</small></div></div>`,
+        ];
+      const f = formatState(l.external_id, st);
+      const attrs = Object.entries(st.attributes)
+        .filter(([k]) => !["unit_of_measurement", "device_class"].includes(k))
+        .slice(0, 6)
+        .map(([k, v]) => `${k.replaceAll("_", " ")}: ${v}`)
+        .join(" · ");
+      return [
+        `<div class="ha-row"><div><b>${esc(st.name || l.external_id)}</b><small>${esc(l.external_id)}${st.changed ? ` · changed ${ago(st.changed)}` : ""}</small>${attrs ? `<small class="ha-attrs">${esc(attrs)}</small>` : ""}</div><span class="ha-state ${f.tone}">${esc(f.text)}</span></div>`,
+      ];
+    });
+    const note = !liveStatus
+      ? '<p class="muted">Loading status…</p>'
+      : !liveStatus.connected
+        ? '<p class="muted">Home Assistant isn\'t connected to StuffTracker.</p>'
+        : liveStatus.error
+          ? `<p class="muted error">${esc(liveStatus.error)}</p>`
+          : "";
+    html += `<div class="ha-links"><h3>Home Assistant</h3>${note}${rows.join("")}</div>`;
+  }
+  if (docs.length)
+    html += `<div class="doc-links"><h3>Documents</h3>${docs
+      .map((l) => {
+        const d = liveDocuments?.documents?.[l.external_id];
+        return d?.url
+          ? `<a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">📄 ${esc(d.title || "Outline document")}</a>`
+          : `<span class="muted">📄 ${liveDocuments && !liveDocuments.connected ? "Outline document (Outline isn't connected)" : liveDocuments ? "Outline document" : "Loading…"}</span>`;
+      })
+      .join("")}</div>`;
+  html += other
+    .map(
+      (l) =>
+        `<div class="external-link"><b>${esc(l.provider.replaceAll("_", " ").toUpperCase())} · ${esc(l.kind)}</b>${esc(l.external_id)}</div>`,
+    )
+    .join("");
+  return `<div class="live-links">${html}</div>`;
+}
+// Repaint only what status touches: pills (scene markup, no layout) and the
+// live sections of the inspector and the phone sheet.
+function paintLive() {
+  if (!dragBase) renderScene();
+  for (const root of [$("inspector"), $("sheet")]) {
+    const box = root.querySelector(".live-links");
+    const e = doc.entities.find(
+      (x) => x.id === (root.id === "sheet" ? sheetId : selected),
+    );
+    if (box && e) box.outerHTML = liveLinksHtml(e);
+  }
+}
+let liveTimer = 0;
+async function refreshLive(documents = false) {
+  if (offline) return;
+  const want = doc.entities.some((e) => e.links?.some((l) => isHa(l.provider)));
+  const wantDocs = doc.entities.some((e) =>
+    e.links?.some((l) => l.provider === "outline"),
+  );
+  try {
+    if (want && !document.hidden)
+      liveStatus = await (await fetch("api/live/status")).json();
+    if (documents && wantDocs)
+      liveDocuments = await (await fetch("api/live/documents")).json();
+    paintLive();
+  } catch {
+    /* status is best-effort; try again next round */
+  }
+}
+function startLive() {
+  void refreshLive(true);
+  clearInterval(liveTimer);
+  let round = 0;
+  liveTimer = window.setInterval(() => {
+    round++;
+    void refreshLive(round % 120 === 0);
+  }, 15000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) void refreshLive();
+  });
+}
 // --- Filters: show only the things whose details match -------------------
 const OPS: Record<Op, string> = {
   contains: "contains",
@@ -441,7 +703,7 @@ function renderScene() {
     const e = doc.entities.find((e) => e.id === n.id)!;
     const fills = ["#edf2e7", "#f5f8f0", "#fcfdf9"];
     const headers = ["#e0ead9", "#e9f0e1", "#f0f5e9"];
-    content += `<g class="node space ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="space-body" width="${n.width}" height="${n.height}" rx="12" fill="${fills[Math.min(n.depth, 2)]}"/><g class="space-header"><path d="M12 0 H${n.width - 12} Q${n.width} 0 ${n.width} 12 V52 H0 V12 Q0 0 12 0 Z" fill="${headers[Math.min(n.depth, 2)]}"/><path class="space-divider" d="M0 52 H${n.width}"/><text class="glyph" x="15" y="35">${icon(e.kind)}</text><text class="kind" x="43" y="18">${esc(e.kind.toUpperCase())}</text><text class="name" x="43" y="36">${esc(e.name)}</text><text class="space-count" x="${n.width - 50}" y="32" text-anchor="end">${n.children} inside</text>${n.children ? `<g class="fold" data-fold="${esc(n.id)}"><rect x="${n.width - 34}" y="16" width="20" height="20" rx="5"/><text x="${n.width - 29}" y="30">−</text></g>` : ""}</g></g>`;
+    content += `<g class="node space ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="space-body" width="${n.width}" height="${n.height}" rx="12" fill="${fills[Math.min(n.depth, 2)]}"/><g class="space-header"><path d="M12 0 H${n.width - 12} Q${n.width} 0 ${n.width} 12 V52 H0 V12 Q0 0 12 0 Z" fill="${headers[Math.min(n.depth, 2)]}"/><path class="space-divider" d="M0 52 H${n.width}"/><text class="glyph" x="15" y="35">${icon(e.kind)}</text><text class="kind" x="43" y="18">${esc(e.kind.toUpperCase())}</text><text class="name" x="43" y="36">${esc(e.name)}</text><text class="space-count" x="${n.width - 50}" y="32" text-anchor="end">${n.children} inside</text>${pillSvg(e, n.width - 44, 5, 30)}${n.children ? `<g class="fold" data-fold="${esc(n.id)}"><rect x="${n.width - 34}" y="16" width="20" height="20" rx="5"/><text x="${n.width - 29}" y="30">−</text></g>` : ""}</g></g>`;
   }
   for (const b of current.bundles) {
     const layer = doc.layers.find((l) => l.id === b.layer)!;
@@ -465,7 +727,7 @@ function renderScene() {
       content += faceplateSvg(n, e);
       continue;
     }
-    content += `<g class="node ${n.collapsed ? "collapsed-space" : ""} ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="${n.width}" height="${n.height}" rx="9"/><text class="glyph" x="15" y="42">${icon(e.kind)}</text><text class="kind" x="45" y="23">${esc(e.kind.toUpperCase())}</text><text class="name" x="45" y="44">${esc(e.name.length > 19 ? e.name.slice(0, 18) + "…" : e.name)}</text>${n.children ? `<g class="fold" data-fold="${esc(e.id)}"><rect x="173" y="10" width="19" height="19" rx="4" fill="#e2edd8"/><text x="178" y="24">+</text></g><text class="kind" x="16" y="62">${n.children} hidden inside</text>` : ""}</g>`;
+    content += `<g class="node ${n.collapsed ? "collapsed-space" : ""} ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="${n.width}" height="${n.height}" rx="9"/><text class="glyph" x="15" y="42">${icon(e.kind)}</text><text class="kind" x="45" y="23">${esc(e.kind.toUpperCase())}</text>${pillSvg(e, n.width - 8, 6, 18)}<text class="name" x="45" y="44">${esc(e.name.length > 19 ? e.name.slice(0, 18) + "…" : e.name)}</text>${n.children ? `<g class="fold" data-fold="${esc(e.id)}"><rect x="173" y="10" width="19" height="19" rx="4" fill="#e2edd8"/><text x="178" y="24">+</text></g><text class="kind" x="16" y="62">${n.children} hidden inside</text>` : ""}</g>`;
   }
   document.getElementById("scene")!.innerHTML = content;
   applyCamera();
@@ -627,7 +889,7 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
     switch: "SWITCH",
     terminals: "TERMINALS",
   }[f.kind];
-  return `<g class="node faceplate ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="${n.width}" height="${n.height}" rx="9"/><text class="glyph" x="15" y="34">${icon(e.kind)}</text><text class="kind" x="45" y="20">${esc(e.kind.toUpperCase())} · ${kindLabel}</text><text class="name" x="45" y="39">${esc(e.name.length > 34 ? e.name.slice(0, 33) + "…" : e.name)}</text>${body}</g>`;
+  return `<g class="node faceplate ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="${n.width}" height="${n.height}" rx="9"/><text class="glyph" x="15" y="34">${icon(e.kind)}</text><text class="kind" x="45" y="20">${esc(e.kind.toUpperCase())} · ${kindLabel}</text><text class="name" x="45" y="39">${esc(e.name.length > 34 ? e.name.slice(0, 33) + "…" : e.name)}</text>${pillSvg(e, n.width - 10, 8, 26)}${body}</g>`;
 }
 // What the inventory search matches: the name and every detail.
 const searchText = (e: Entity) =>
@@ -976,7 +1238,7 @@ function renderInspector() {
     ]),
   ];
   $("inspector").innerHTML =
-    `<span class="eyebrow">SELECTED ${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${doc.connections.filter((c) => c.endpoints.some((ep) => ep.entity === e.id)).length} connections · ${doc.entities.filter((n) => n.parent === e.id).length} children</p>${e.links.map((l) => `<div class="external-link"><b>${esc(l.provider.replaceAll("_", " ").toUpperCase())} · ${esc(l.kind)}</b>${esc(l.external_id)}</div>`).join("")}${actionsHtml(e)}${detailsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, writable)}${
+    `<span class="eyebrow">SELECTED ${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${doc.connections.filter((c) => c.endpoints.some((ep) => ep.entity === e.id)).length} connections · ${doc.entities.filter((n) => n.parent === e.id).length} children</p>${liveLinksHtml(e)}${actionsHtml(e)}${detailsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, writable)}${
       writable
         ? `<form id="entity-form"><label class="field">Name<input name="name" value="${esc(e.name)}" required maxlength="150"></label><label class="field">Type<input name="kind" list="kinds" value="${esc(e.kind)}" required maxlength="40"><datalist id="kinds">${kinds.map((k) => `<option value="${esc(k)}">`).join("")}</datalist></label><label class="field">Parent<select name="parent"><option value="">Top level</option>${doc.entities
             .filter((n) => !descendants.has(n.id))
@@ -1463,7 +1725,7 @@ function renderSheet() {
   const links = doc.connections.filter((c) =>
     c.endpoints.some((ep) => ep.entity === e.id),
   ).length;
-  sheet.innerHTML = `<div class="sheet-head"><div><span class="eyebrow">${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${links} connections${inside ? ` · ${inside} inside` : ""}</p></div><button class="sheet-close" aria-label="Close">✕</button></div>${actionsHtml(e)}${detailsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, false)}`;
+  sheet.innerHTML = `<div class="sheet-head"><div><span class="eyebrow">${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${links} connections${inside ? ` · ${inside} inside` : ""}</p></div><button class="sheet-close" aria-label="Close">✕</button></div>${liveLinksHtml(e)}${actionsHtml(e)}${detailsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, false)}`;
   sheet.querySelector<HTMLButtonElement>(".sheet-close")!.onclick = () => {
     sheetId = null;
     renderSheet();
@@ -2134,6 +2396,8 @@ async function start() {
   $("save-document").hidden = !writable;
   updateViews();
   render();
+  // Status loads afterwards, on its own; drawing never waits for it.
+  startLive();
   status(
     offline
       ? "Offline viewer · Rust/WASM engine"

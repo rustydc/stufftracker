@@ -353,11 +353,31 @@ impl Api {
         store_snapshot(&self.app, s).map_err(error)
     }
 }
-pub async fn serve(app: App) -> anyhow::Result<()> {
-    use darude_runtime::sessions::{SessionFactory, SessionProvides, serve_sessions};
+pub async fn serve(
+    app: App,
+    live_rx: tokio::sync::mpsc::UnboundedReceiver<crate::live::Request>,
+) -> anyhow::Result<()> {
+    use crate::live::{HA_SLOT, Live, OUTLINE_SLOT};
+    use darude_runtime::sessions::{
+        GrainProfile, SessionFactory, SessionProvides, SlotDecl, serve_grain,
+    };
+    let live = Rc::new(Live::default());
+    live.run(app.clone(), live_rx);
+    let factory_live = live.clone();
     let factory: SessionFactory = Rc::new(move |ctx| {
         let app = app.clone();
+        let live = factory_live.clone();
         Box::pin(async move {
+            let mut ctx = ctx;
+            // The platform's own session carries the instance's bindings:
+            // pull them from Self, keep Self to re-pull on wiring changes.
+            if ctx.is_platform {
+                if let Some(sc) = ctx.requires.take::<darude_runtime::self_::Client>("self") {
+                    ctx.requires.pull_from_self(&sc).await;
+                    live.keep_self(sc);
+                }
+                live.adopt(&ctx.requires);
+            }
             let cap: api::Client = capnp_rpc::new_client(Api {
                 app,
                 rights: ctx.rights,
@@ -370,7 +390,34 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
             ))
         })
     });
-    serve_sessions(factory).await
+    let on_change = live.clone();
+    serve_grain(
+        factory,
+        GrainProfile {
+            // Optional live status, wired post-launch through the powerbox.
+            slots: vec![
+                SlotDecl {
+                    name: HA_SLOT.into(),
+                    interface: "homeassistant.v1".into(),
+                    rights: vec!["read".into()],
+                    many: false,
+                    doc: "Home Assistant, to show linked things' live state".into(),
+                },
+                SlotDecl {
+                    name: OUTLINE_SLOT.into(),
+                    interface: "outline.v1".into(),
+                    rights: vec!["read".into()],
+                    many: false,
+                    doc: "Outline, to show linked documents' titles and links".into(),
+                },
+            ],
+            on_slots_changed: Some(Rc::new(move |_| {
+                tokio::task::spawn_local(on_change.clone().repull());
+            })),
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 impl api::Server for Api {
@@ -834,6 +881,7 @@ mod tests {
         App {
             db: std::sync::Arc::new(std::sync::Mutex::new(db)),
             grain: true,
+            live: None,
         }
     }
     fn client(app: &App, rights: &[&str]) -> api::Client {

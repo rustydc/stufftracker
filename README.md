@@ -55,6 +55,14 @@ automation. Subsequent boots preserve your data.
   rating, what it connects to, and its own details (a VLAN, a wire colour, the
   directory label, a multi-interface device's IP address). Ends, ports and
   connection lists all link to each other; phones show the same on the sheet.
+- **Live status.** Things linked to Home Assistant (`home_assistant` links of
+  kind `entity`, or `area` for a room) show their current state: a pill on the
+  card ("on 78%", "21.4 °C", "open", "unavailable"; a linked room summarises
+  its temperature, lights on and anything open) and a Home Assistant section
+  in the inspector with each entity's state, attributes and last change.
+  Outline links show their document's title and open it. Status loads after
+  the page draws and refreshes every 15 seconds; it never delays drawing or
+  layout. Everyone who can open StuffTracker sees it.
 - **Filters.** **Filter** (beside the saved views) shows only the things whose
   details match: pick a detail key (or Name, Kind, Any field), a test
   (contains, is, has, doesn't have) and a value, and combine conditions with
@@ -130,6 +138,19 @@ A grain never binds a TCP listener. Missing Darude permissions fail closed for
 writes: only `write` or `owner` in the proxy-injected `X-Darude-Permissions` allows
 inventory or saved-view mutation. Read shares can rearrange their local view and
 export snapshots. The app requires no egress.
+
+### Live status in Darude
+
+The grain declares two optional slots at registration, `home_assistant`
+(`homeassistant.v1`, read) and `outline` (`outline.v1`, read), and requires
+`self.v1` to pull their bindings at startup and on every wiring change. Wire
+them from the Darude shell's powerbox (or `POST /api/powerbox/offer` with the
+slot name). StuffTracker only reads: it cannot call services. `GET
+/api/live/status` returns the states of linked entities and of the entities in
+linked areas (cached 10 s; area membership 10 min), and `GET
+/api/live/documents` the titles and URLs of linked Outline documents (cached
+1 h); both answer `{"connected": false}` until wired. The client schemas are
+copies of the bridges' (`crates/server/schemas/`).
 
 ## Model and API
 

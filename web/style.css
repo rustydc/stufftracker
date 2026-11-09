@@ -1321,3 +1321,99 @@ label.toggle {
   color: inherit;
   font-size: 12px;
 }
+/* Live status from Home Assistant. */
+.ha-pill rect {
+  fill: #eef1ec;
+  stroke: #d6ddd3;
+}
+.ha-pill text {
+  font-size: 9.5px;
+  font-weight: 650;
+  fill: #4b5d50;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+.ha-pill.on rect {
+  fill: #fbe7a6;
+  stroke: #e3c25e;
+}
+.ha-pill.on text {
+  fill: #6b5207;
+}
+.ha-pill.alert rect {
+  fill: #fbd9d3;
+  stroke: #e7a598;
+}
+.ha-pill.alert text {
+  fill: #8b2f1f;
+}
+.ha-pill.value rect {
+  fill: #e3efe6;
+  stroke: #b9d3c0;
+}
+.ha-pill.value text {
+  fill: #2f5c45;
+}
+.ha-pill.muted text {
+  fill: #98a296;
+}
+.ha-links,
+.doc-links {
+  margin: 10px 0;
+}
+.ha-links h3,
+.doc-links h3 {
+  font-size: 12px;
+  margin: 0 0 6px;
+}
+.ha-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 0;
+  border-top: 1px solid #e6ebe4;
+  font-size: 12px;
+}
+.ha-row small {
+  display: block;
+  color: #82917f;
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+.ha-row .ha-attrs {
+  color: #6d7d6c;
+}
+.ha-state {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 650;
+  background: #eef1ec;
+  color: #4b5d50;
+}
+.ha-state.on {
+  background: #fbe7a6;
+  color: #6b5207;
+}
+.ha-state.alert {
+  background: #fbd9d3;
+  color: #8b2f1f;
+}
+.ha-state.value {
+  background: #e3efe6;
+  color: #2f5c45;
+}
+.ha-state.muted {
+  color: #98a296;
+}
+.doc-links a,
+.doc-links span {
+  display: block;
+  padding: 3px 0;
+  font-size: 12.5px;
+}
+.doc-links a {
+  color: #2f6b4d;
+}

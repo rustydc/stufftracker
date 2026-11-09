@@ -15,3 +15,13 @@ routes:
 # App-owned schema is announced at ABI v2 registration, after SQLite and HTTP are ready.
 api: stufftracker.v1
 # No ambient network access or Home Assistant credentials are required.
+#
+# Live status comes through two optional slots the grain declares at
+# registration, wired post-launch to the Home Assistant and Outline bridges:
+#   home_assistant (homeassistant.v1, read): states for linked entities/areas
+#   outline (outline.v1, read): titles and URLs for linked documents
+# Read rights only: StuffTracker can show state but never call a service.
+requires:
+  # The reflective self-discovery handle: slot bindings are pulled from
+  # Self.held() at startup and on every wiring change.
+  self: { interface: self.v1, rights: [read] }

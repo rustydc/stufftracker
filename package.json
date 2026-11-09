@@ -12,7 +12,8 @@
     "test:mobile": "node scripts/mobile-test.mjs",
     "test:physical": "node scripts/physical-test.mjs",
     "test:details": "node scripts/details-test.mjs",
-    "test:links": "node scripts/links-test.mjs"
+    "test:links": "node scripts/links-test.mjs",
+    "test:live": "node scripts/live-test.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.51.0",

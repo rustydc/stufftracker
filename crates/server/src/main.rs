@@ -1,7 +1,17 @@
+mod live;
 mod rpc;
 #[allow(dead_code, unused_parens, clippy::all)]
 pub mod stufftracker_v1_capnp {
     include!(concat!(env!("OUT_DIR"), "/stufftracker_v1_capnp.rs"));
+}
+// Client types for the bridges read through the optional slots (schemas/).
+#[allow(dead_code, unused_parens, clippy::all)]
+pub mod homeassistant_v1_capnp {
+    include!(concat!(env!("OUT_DIR"), "/homeassistant_v1_capnp.rs"));
+}
+#[allow(dead_code, unused_parens, clippy::all)]
+pub mod outline_v1_capnp {
+    include!(concat!(env!("OUT_DIR"), "/outline_v1_capnp.rs"));
 }
 use axum::{
     Json, Router,
@@ -22,6 +32,8 @@ use stufftracker_core::{Document, LayoutRequest, View};
 struct App {
     db: Arc<Mutex<Connection>>,
     grain: bool,
+    /// Live status from the bridges, when running as a grain.
+    live: Option<live::LiveHandle>,
 }
 type Error = (StatusCode, String);
 fn internal(e: impl std::fmt::Display) -> Error {
@@ -432,6 +444,17 @@ async fn move_node(Json(r): Json<stufftracker_core::MoveRequest>) -> Result<Json
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
+/// Live status: what the bridges report, or `connected: false`. Readers see
+/// it too; it never blocks the document or layout.
+async fn live_json(
+    a: &App,
+    make: fn(tokio::sync::oneshot::Sender<serde_json::Value>) -> live::Request,
+) -> Json<serde_json::Value> {
+    Json(match &a.live {
+        Some(h) => h.ask(make).await,
+        None => serde_json::json!({ "connected": false }),
+    })
+}
 fn router(a: App) -> Router {
     Router::new()
         .route(
@@ -448,6 +471,16 @@ fn router(a: App) -> Router {
             post(upload_attachment).layer(DefaultBodyLimit::max(MAX_ATTACHMENT)),
         )
         .route("/api/attachments/{id}", get(get_attachment))
+        .route(
+            "/api/live/status",
+            get(|State(a): State<App>| async move { live_json(&a, live::Request::Status).await }),
+        )
+        .route(
+            "/api/live/documents",
+            get(
+                |State(a): State<App>| async move { live_json(&a, live::Request::Documents).await },
+            ),
+        )
         .route(
             "/api/session",
             get(|State(a): State<App>, h: HeaderMap| async move {
@@ -468,9 +501,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = Connection::open(state.join("stufftracker.sqlite3"))?;
     initialize(&mut db)?;
     let socket = std::env::var("DARUDE_HTTP_SOCKET").ok();
+    let rpc_grain = std::env::var_os("DARUDE_PLATFORM_SOCKET").is_some();
+    let (live_handle, live_rx) = live::channel();
     let state = App {
         db: Arc::new(Mutex::new(db)),
-        grain: socket.is_some() || std::env::var_os("DARUDE_PLATFORM_SOCKET").is_some(),
+        grain: socket.is_some() || rpc_grain,
+        live: rpc_grain.then_some(live_handle),
     };
     if std::env::var_os("DARUDE_PLATFORM_SOCKET").is_some() && socket.is_none() {
         return Err("DARUDE_PLATFORM_SOCKET requires DARUDE_HTTP_SOCKET".into());
@@ -489,7 +525,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             local.run_until(async move {
                 tokio::select! {
                     result = axum::serve(listener, app).into_future() => result.map_err(anyhow::Error::from),
-                    result = rpc::serve(state) => result,
+                    result = rpc::serve(state, live_rx) => result,
                 }
             }).await?;
         } else {
@@ -530,6 +566,7 @@ mod tests {
         App {
             db: Arc::new(Mutex::new(db)),
             grain: false,
+            live: None,
         }
     }
     #[test]
@@ -579,6 +616,7 @@ mod tests {
         let a = App {
             db: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
             grain: true,
+            live: None,
         };
         let mut h = HeaderMap::new();
         assert!(!writable(&a, &h));

@@ -13,4 +13,14 @@ fn main() {
         .expect("compile stufftracker.v1 schema (requires capnp)");
     darude_schema_docs::inject_into_file(&schema, std::path::Path::new("stufftracker-v1.capnp"))
         .expect("inject API documentation");
+    // Client types for the bridges StuffTracker reads through optional slots.
+    println!("cargo:rerun-if-changed=schemas");
+    capnpc::CompilerCommand::new()
+        .src_prefix("schemas")
+        .file("schemas/homeassistant-v1.capnp")
+        .file("schemas/outline-v1.capnp")
+        .import_path("../../vendor/darude/schemas")
+        .crate_provides("darude_wire", [0x88958d009b0f5516u64])
+        .run()
+        .expect("compile bridge client schemas");
 }
