@@ -25,7 +25,19 @@ type Entity = {
   links: { provider: string; kind: string; external_id: string }[];
   faceplate?: Faceplate;
   ports?: Port[];
+  properties?: Property[];
 };
+type PropertyValue =
+  | { type: "text"; text: string }
+  | { type: "link"; url: string; title?: string }
+  | {
+      type: "file";
+      attachment: string;
+      name: string;
+      mime: string;
+      size: number;
+    };
+type Property = { key: string } & PropertyValue;
 type Role = "source" | "target" | "peer";
 type Endpoint = { entity: string; role: Role; port?: string };
 type Connection = {
@@ -426,13 +438,28 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
   }[f.kind];
   return `<g class="node faceplate ${selected === n.id ? "selected" : ""} ${picked.has(n.id) ? "picked" : ""}" data-id="${esc(n.id)}" data-parent="${esc(e.parent || "")}" data-width="${n.width}" data-height="${n.height}" transform="translate(${n.position.x},${n.position.y})"><rect class="card" width="${n.width}" height="${n.height}" rx="9"/><text class="glyph" x="15" y="34">${icon(e.kind)}</text><text class="kind" x="45" y="20">${esc(e.kind.toUpperCase())} · ${kindLabel}</text><text class="name" x="45" y="39">${esc(e.name.length > 34 ? e.name.slice(0, 33) + "…" : e.name)}</text>${body}</g>`;
 }
+// What the inventory search matches: the name and every detail.
+const searchText = (e: Entity) =>
+  [
+    e.name,
+    ...(e.properties || []).flatMap((p) => [
+      p.key,
+      p.type === "text"
+        ? p.text
+        : p.type === "link"
+          ? `${p.url} ${p.title || ""}`
+          : p.name,
+    ]),
+  ]
+    .join("\n")
+    .toLowerCase();
 function renderTree() {
   const query = $<HTMLInputElement>("search").value.toLowerCase();
   let html = "";
   function walk(parent: string | null, depth: number) {
     for (const e of doc.entities.filter((e) => e.parent === parent)) {
       const children = doc.entities.some((n) => n.parent === e.id);
-      if (!query || e.name.toLowerCase().includes(query))
+      if (!query || searchText(e).includes(query))
         html += `<div class="tree-row ${selected === e.id ? "selected" : ""}" data-select="${esc(e.id)}" style="padding-left:${depth * 13 + 3}px"><button data-fold="${esc(e.id)}" ${children ? "" : "disabled"} aria-label="Toggle ${esc(e.name)}">${children ? (view.collapsed.includes(e.id) ? "▸" : "▾") : "·"}</button><span class="kind-icon">${icon(e.kind)}</span><span>${esc(e.name)}</span></div>`;
       if (!view.collapsed.includes(e.id) || query) walk(e.id, depth + 1);
     }
@@ -604,7 +631,7 @@ function renderInspector() {
     ]),
   ];
   $("inspector").innerHTML =
-    `<span class="eyebrow">SELECTED ${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${doc.connections.filter((c) => c.endpoints.some((ep) => ep.entity === e.id)).length} connections · ${doc.entities.filter((n) => n.parent === e.id).length} children</p>${e.links.map((l) => `<div class="external-link"><b>${esc(l.provider.replaceAll("_", " ").toUpperCase())} · ${esc(l.kind)}</b>${esc(l.external_id)}</div>`).join("")}${actionsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, writable)}${
+    `<span class="eyebrow">SELECTED ${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${doc.connections.filter((c) => c.endpoints.some((ep) => ep.entity === e.id)).length} connections · ${doc.entities.filter((n) => n.parent === e.id).length} children</p>${e.links.map((l) => `<div class="external-link"><b>${esc(l.provider.replaceAll("_", " ").toUpperCase())} · ${esc(l.kind)}</b>${esc(l.external_id)}</div>`).join("")}${actionsHtml(e)}${detailsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, writable)}${
       writable
         ? `<form id="entity-form"><label class="field">Name<input name="name" value="${esc(e.name)}" required maxlength="150"></label><label class="field">Type<input name="kind" list="kinds" value="${esc(e.kind)}" required maxlength="40"><datalist id="kinds">${kinds.map((k) => `<option value="${esc(k)}">`).join("")}</datalist></label><label class="field">Parent<select name="parent"><option value="">Top level</option>${doc.entities
             .filter((n) => !descendants.has(n.id))
@@ -614,7 +641,7 @@ function renderInspector() {
             )
             .join(
               "",
-            )}</select></label><div class="button-row"><button>Apply</button><button type="button" id="delete-entity" class="danger">Delete${descendants.size > 1 ? ` (${descendants.size})` : ""}</button></div></form>${leaf ? portEditorHtml(e) : ""}<form id="connect-form" class="connect-form"><h3>Connect this thing</h3><label class="field">Connection name<input name="name" required placeholder="e.g. Office power"></label><label class="field">Layer<select name="layer">${doc.layers.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("")}</select></label><label class="field">Other endpoints<select name="targets" multiple required size="4">${doc.entities
+            )}</select></label><div class="button-row"><button>Apply</button><button type="button" id="delete-entity" class="danger">Delete${descendants.size > 1 ? ` (${descendants.size})` : ""}</button></div></form>${detailsEditorHtml(e)}${leaf ? portEditorHtml(e) : ""}<form id="connect-form" class="connect-form"><h3>Connect this thing</h3><label class="field">Connection name<input name="name" required placeholder="e.g. Office power"></label><label class="field">Layer<select name="layer">${doc.layers.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("")}</select></label><label class="field">Other endpoints<select name="targets" multiple required size="4">${doc.entities
             .filter((n) => n.id !== e.id)
             .map((n) => `<option value="${esc(n.id)}">${esc(n.name)}</option>`)
             .join(
@@ -673,6 +700,7 @@ function renderInspector() {
       markDirty();
     };
   wireEntityActions($("inspector"), e);
+  if (writable) wireDetailsEditor(e);
   $("inspector")
     .querySelectorAll<HTMLSelectElement>("[data-assign]")
     .forEach(
@@ -790,6 +818,145 @@ function renderInspector() {
     };
   }
 }
+// Details: key/value properties. Text shows as text, links open in a new
+// tab, images as thumbnails, other files (PDF manuals) as downloads.
+const attachmentUrl = (id: string) => `api/attachments/${id}`;
+const isPicture = (mime: string) =>
+  mime.startsWith("image/") && !mime.includes("svg");
+const sizeText = (n: number) =>
+  n < 1024
+    ? `${n} B`
+    : n < 1 << 20
+      ? `${Math.round(n / 1024)} KB`
+      : `${(n / (1 << 20)).toFixed(1)} MB`;
+function detailsHtml(e: Entity) {
+  if (!e.properties?.length) return "";
+  const value = (p: Property) => {
+    if (p.type === "text")
+      return `<span class="detail-text">${esc(p.text)}</span>`;
+    if (p.type === "link")
+      return `<a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.title || p.url)}</a>`;
+    // The offline export carries no attachments, only their names.
+    if (offline)
+      return `<span class="muted">${esc(p.name)} (not in this export)</span>`;
+    const url = attachmentUrl(p.attachment);
+    return isPicture(p.mime)
+      ? `<a href="${url}" target="_blank" rel="noopener" class="detail-image"><img src="${url}" alt="${esc(p.name)}" loading="lazy"></a>`
+      : `<a href="${url}" target="_blank" rel="noopener" class="detail-file">📄 ${esc(p.name)} <small>${sizeText(p.size)}</small></a>`;
+  };
+  return `<div class="details-list"><h3>Details</h3><dl>${e.properties
+    .map((p) => `<dt>${esc(p.key)}</dt><dd>${value(p)}</dd>`)
+    .join("")}</dl></div>`;
+}
+// Details are drafted in the editor until applied, like ports.
+let draftDetails: { entity: string; rows: Property[] } | null = null;
+let detailsEditorOpen = false;
+function detailsEditorHtml(e: Entity) {
+  const rows =
+    draftDetails?.entity === e.id
+      ? draftDetails.rows
+      : structuredClone(e.properties || []);
+  draftDetails = { entity: e.id, rows };
+  const valueInputs = (p: Property, i: number) =>
+    p.type === "text"
+      ? `<input data-detail="${i}" data-field="text" value="${esc(p.text)}" maxlength="4000" placeholder="Value" aria-label="Value">`
+      : p.type === "link"
+        ? `<input data-detail="${i}" data-field="url" type="url" value="${esc(p.url)}" placeholder="https://…" aria-label="Link"><input data-detail="${i}" data-field="title" value="${esc(p.title || "")}" maxlength="200" placeholder="Title (optional)" aria-label="Link title">`
+        : `<div class="detail-upload">${p.attachment ? `<span>${esc(p.name)} <small>${sizeText(p.size)}</small></span>` : '<span class="muted">No file yet</span>'}<input data-detail="${i}" data-field="file" type="file" aria-label="Choose file"></div>`;
+  return `<details class="details-editor" ${detailsEditorOpen ? "open" : ""}><summary>Edit details</summary><div id="details-rows">${rows
+    .map(
+      (p, i) =>
+        `<div class="detail-row"><div class="l1"><input data-detail="${i}" data-field="key" value="${esc(p.key)}" maxlength="80" placeholder="Key, e.g. IP address" aria-label="Key"><select data-detail="${i}" data-field="type" aria-label="Kind">${(["text", "link", "file"] as const).map((t) => `<option value="${t}" ${p.type === t ? "selected" : ""}>${{ text: "Text", link: "Link", file: "File" }[t]}</option>`).join("")}</select><button type="button" class="remove-port" data-remove-detail="${i}" aria-label="Remove ${esc(p.key || "detail")}">✕</button></div><div class="l2">${valueInputs(p, i)}</div></div>`,
+    )
+    .join(
+      "",
+    )}</div><div class="button-row"><button type="button" id="add-detail">＋ Detail</button><button type="button" id="apply-details">Apply details</button></div></details>`;
+}
+function wireDetailsEditor(e: Entity) {
+  const root = document.querySelector<HTMLDetailsElement>(
+    "#inspector .details-editor",
+  );
+  if (!root || !draftDetails) return;
+  const rows = draftDetails.rows;
+  root.ontoggle = () => (detailsEditorOpen = root.open);
+  root
+    .querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-detail]")
+    .forEach((el) => {
+      const i = Number(el.dataset.detail),
+        field = el.dataset.field!;
+      if (field === "file")
+        el.onchange = async () => {
+          const file = (el as HTMLInputElement).files?.[0];
+          if (!file) return;
+          status(`Uploading ${file.name}…`);
+          try {
+            const r = await fetch("api/attachments", {
+              method: "POST",
+              headers: {
+                "Content-Type": file.type || "application/octet-stream",
+                "X-File-Name": encodeURIComponent(file.name),
+              },
+              body: file,
+            });
+            if (!r.ok) throw new Error(await r.text());
+            const a = await r.json();
+            rows[i] = { key: rows[i].key || file.name, type: "file", ...a };
+            status(`Uploaded ${file.name}; apply and save to keep it`);
+          } catch (err) {
+            status(`Upload failed: ${(err as Error).message}`, true);
+          }
+          renderInspector();
+        };
+      else if (field === "type")
+        el.onchange = () => {
+          const key = rows[i].key;
+          const t = el.value as Property["type"];
+          rows[i] =
+            t === "text"
+              ? { key, type: "text", text: "" }
+              : t === "link"
+                ? { key, type: "link", url: "", title: "" }
+                : {
+                    key,
+                    type: "file",
+                    attachment: "",
+                    name: "",
+                    mime: "",
+                    size: 0,
+                  };
+          renderInspector();
+        };
+      else
+        el.oninput = () =>
+          ((rows[i] as Record<string, unknown>)[field] = el.value);
+    });
+  root.querySelectorAll<HTMLButtonElement>("[data-remove-detail]").forEach(
+    (b) =>
+      (b.onclick = () => {
+        rows.splice(Number(b.dataset.removeDetail), 1);
+        renderInspector();
+      }),
+  );
+  $("add-detail").onclick = () => {
+    rows.push({ key: "", type: "text", text: "" });
+    renderInspector();
+  };
+  $("apply-details").onclick = () => {
+    const keep = rows
+      .map((p) => ({ ...p, key: p.key.trim() }))
+      .filter((p) => p.key && !(p.type === "file" && !p.attachment));
+    if (
+      tryEdit((d) => {
+        const target = d.entities.find((x) => x.id === e.id)!;
+        if (keep.length) target.properties = keep;
+        else delete target.properties;
+      })
+    ) {
+      draftDetails = null;
+      status("Details applied; save to keep them");
+    }
+  };
+}
 // The view actions for one thing: show it, trace it, draw its faceplate.
 // Shared by the inspector and the phone's bottom sheet.
 function actionsHtml(e: Entity) {
@@ -840,7 +1007,7 @@ function renderSheet() {
   const links = doc.connections.filter((c) =>
     c.endpoints.some((ep) => ep.entity === e.id),
   ).length;
-  sheet.innerHTML = `<div class="sheet-head"><div><span class="eyebrow">${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${links} connections${inside ? ` · ${inside} inside` : ""}</p></div><button class="sheet-close" aria-label="Close">✕</button></div>${actionsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, false)}`;
+  sheet.innerHTML = `<div class="sheet-head"><div><span class="eyebrow">${esc(e.kind.toUpperCase())}</span><h2>${esc(e.name)}</h2><p class="muted">${links} connections${inside ? ` · ${inside} inside` : ""}</p></div><button class="sheet-close" aria-label="Close">✕</button></div>${actionsHtml(e)}${detailsHtml(e)}${scheduleHtml(e)}${connectionsHtml(e, false)}`;
   sheet.querySelector<HTMLButtonElement>(".sheet-close")!.onclick = () => {
     sheetId = null;
     renderSheet();

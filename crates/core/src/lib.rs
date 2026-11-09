@@ -18,6 +18,53 @@ pub struct Entity {
     /// terminals). A connection endpoint may name one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<Port>,
+    /// Free-form details, in display order: IP address, model number, a
+    /// manual, a photo, a link for more information.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<Property>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Property {
+    /// What it is: "IP address", "Model", "Manual".
+    pub key: String,
+    #[serde(flatten)]
+    pub value: PropertyValue,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PropertyValue {
+    Text {
+        text: String,
+    },
+    Link {
+        url: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        title: String,
+    },
+    /// An uploaded file (image, PDF manual, ...), stored by the server and
+    /// named by its content hash.
+    File {
+        attachment: String,
+        name: String,
+        mime: String,
+        size: u64,
+    },
+}
+impl Entity {
+    /// The attachments its details refer to.
+    pub fn attachments(&self) -> impl Iterator<Item = &str> {
+        self.properties.iter().filter_map(|p| match &p.value {
+            PropertyValue::File { attachment, .. } => Some(attachment.as_str()),
+            _ => None,
+        })
+    }
+}
+/// An attachment ID: the lowercase hex SHA-256 of its bytes.
+pub fn is_attachment_id(id: &str) -> bool {
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -318,6 +365,7 @@ pub fn validate(doc: &Document) -> Result<(), String> {
             return Err("An entity needs a name".into());
         }
         validate_ports(e)?;
+        validate_properties(e)?;
         let mut seen = BTreeSet::new();
         let mut current = Some(e.id.as_str());
         while let Some(id) = current {
@@ -355,6 +403,45 @@ pub fn validate(doc: &Document) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_properties(e: &Entity) -> Result<(), String> {
+    if e.properties.len() > 100 {
+        return Err(format!("{}: at most 100 details", e.name));
+    }
+    for p in &e.properties {
+        let bad = |what: &str| Err(format!("{}: detail {:?} {what}", e.name, p.key));
+        if p.key.trim().is_empty() || p.key.len() > 80 {
+            return bad("needs a key of at most 80 characters");
+        }
+        match &p.value {
+            PropertyValue::Text { text } if text.len() > 4000 => {
+                return bad("is over 4000 characters");
+            }
+            PropertyValue::Link { url, title } => {
+                let lower = url.to_ascii_lowercase();
+                if url.len() > 2000
+                    || title.len() > 200
+                    || !["http://", "https://", "mailto:"]
+                        .iter()
+                        .any(|s| lower.starts_with(s))
+                {
+                    return bad("needs an http(s) or mailto link");
+                }
+            }
+            PropertyValue::File {
+                attachment,
+                name,
+                mime,
+                ..
+            } => {
+                if !is_attachment_id(attachment) || name.len() > 200 || mime.len() > 100 {
+                    return bad("names an invalid attachment");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 /// Port IDs are unique and every occupied space or position is taken once
 /// (tandem halves A and B may share a breaker space).
 fn validate_ports(e: &Entity) -> Result<(), String> {
@@ -4593,6 +4680,60 @@ mod tests {
         let p = bad.entities.iter_mut().find(|e| e.id == "panel").unwrap();
         p.ports[0].position = Some(11);
         assert!(validate(&bad).is_err(), "a main takes no position");
+    }
+    #[test]
+    fn details_are_typed_key_value_pairs() {
+        let id = "a".repeat(64);
+        let json = format!(
+            r#"[{{"key":"IP address","type":"text","text":"192.168.1.244"}},
+               {{"key":"Docs","type":"link","url":"https://ui.com/us8","title":"Product page"}},
+               {{"key":"Manual","type":"file","attachment":"{id}","name":"US8.pdf","mime":"application/pdf","size":1234}}]"#
+        );
+        let props: Vec<Property> = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            props[0].value,
+            PropertyValue::Text {
+                text: "192.168.1.244".into()
+            }
+        );
+        assert!(matches!(
+            &props[2].value,
+            PropertyValue::File { size: 1234, .. }
+        ));
+        let back = serde_json::to_value(&props).unwrap();
+        assert_eq!(back[1]["type"], "link");
+        assert_eq!(back[2]["attachment"], id.as_str());
+        let mut doc = sample();
+        doc.entities[0].properties = props;
+        validate(&doc).unwrap();
+        assert_eq!(
+            doc.entities[0].attachments().collect::<Vec<_>>(),
+            [id.as_str()]
+        );
+        let bad = |v: PropertyValue| {
+            let mut d = sample();
+            d.entities[0].properties = vec![Property {
+                key: "k".into(),
+                value: v,
+            }];
+            validate(&d).is_err()
+        };
+        assert!(bad(PropertyValue::Link {
+            url: "javascript:alert(1)".into(),
+            title: String::new()
+        }));
+        assert!(bad(PropertyValue::File {
+            attachment: "../etc/passwd".into(),
+            name: "x".into(),
+            mime: "text/plain".into(),
+            size: 1
+        }));
+        let mut d = sample();
+        d.entities[0].properties = vec![Property {
+            key: " ".into(),
+            value: PropertyValue::Text { text: "x".into() },
+        }];
+        assert!(validate(&d).is_err(), "a key is required");
     }
     #[test]
     fn ratings_and_protection_are_port_data() {

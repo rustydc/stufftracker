@@ -14,10 +14,11 @@ capnp = "0.20"
 capnp-rpc = "0.20"
 darude-runtime = { path = "../../vendor/darude/crates/runtime" }
 anyhow = "1"
+sha2 = "0.10"
+darude-wire = { path = "../../vendor/darude/crates/wire" }
 [build-dependencies]
 capnpc = "0.20"
 darude-schema-docs = { path = "../../vendor/darude/crates/schema-docs" }
 [dev-dependencies]
-darude-wire = { path = "../../vendor/darude/crates/wire" }
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["compat"] }

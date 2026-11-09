@@ -43,6 +43,10 @@ automation. Subsequent boots preserve your data.
   name/type/parent edits in the inspector, or add a directed or undirected
   connection. Multiple targets make a hyperedge. Delete removes a subtree and
   prunes affected endpoints. **Save changes** commits inventory edits to SQLite.
+- **Details.** **Edit details** adds key/value details to a thing: text (an IP
+  address, a model or serial number), a link for more information, or a file
+  (a photo, a PDF manual) uploaded from your device. They show in the
+  inspector, and search finds things by them.
 - **Physical layouts.** A thing can carry ports: switch ports, breaker-panel
   spaces, or controller terminals. Edit them under **Physical layout & ports**:
   pick a layout (breaker panel, network switch, terminal strip), add ports one
@@ -116,6 +120,21 @@ Each entity has one parent and arbitrary external references
 `{provider, kind, external_id}`. Home Assistant references will point to its areas,
 devices or entities without making its hierarchy authoritative here. A sample
 link is attached to the kitchen pendants; no live HA connection exists yet.
+
+Entities also carry **details**: ordered key/value `properties`, each a `text`
+value, a `link` (http, https or mailto, with an optional title), or a `file`
+naming an uploaded attachment (a photo, a PDF manual). The inspector and the
+phone sheet show them (images as thumbnails, other files as downloads), the
+inspector's **Edit details** changes them, and the inventory search matches
+detail keys and values. Attachments are stored in SQLite, named by the
+SHA-256 of their bytes: `POST /api/attachments` (raw body, `Content-Type`,
+URL-encoded `X-File-Name`, at most 25 MiB, write access) returns the
+`{attachment, name, mime, size}` to put in a file detail, and
+`GET /api/attachments/{id}` serves it. Images (not SVG), PDFs and plain text
+open in the browser; anything else downloads; responses are `nosniff` and
+sandboxed. A document may only name stored attachments, and an upload that no
+detail refers to is removed a day later. The exported offline viewer lists
+attachments by name but does not embed them.
 
 Connections contain two or more unique entity endpoints. Endpoints have `source`,
 `target`, or `peer` roles. One source and several targets represent fanout;

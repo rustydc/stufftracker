@@ -1052,3 +1052,96 @@ label.toggle {
 .node.faceplate .slot-label.tiny {
   font-size: 7.5px;
 }
+/* Details: key/value properties of the selected thing. */
+.details-list {
+  margin: 12px 0;
+}
+.details-list h3 {
+  font-size: 12px;
+  margin: 0 0 6px;
+}
+.details-list dl {
+  display: grid;
+  grid-template-columns: minmax(70px, auto) 1fr;
+  gap: 5px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+.details-list dt {
+  color: #82917f;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.details-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.detail-text {
+  user-select: text;
+  font-variant-numeric: tabular-nums;
+}
+.details-list a {
+  color: #2f6b4d;
+}
+.detail-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 160px;
+  border-radius: 6px;
+  border: 1px solid #dfe6dd;
+}
+.detail-file small {
+  color: #82917f;
+}
+.detail-row {
+  padding: 5px 0;
+  border-top: 1px solid #e6ebe4;
+}
+.detail-row .l1 {
+  display: grid;
+  grid-template-columns: 1fr 64px 22px;
+  gap: 3px;
+  align-items: center;
+}
+.detail-row .l2 {
+  display: grid;
+  gap: 3px;
+  margin-top: 3px;
+}
+.detail-row input,
+.detail-row select {
+  width: 100%;
+  min-width: 0;
+  font-size: 11px;
+  padding: 3px 4px;
+  border: 1px solid #d6dfd5;
+  border-radius: 4px;
+}
+.detail-row .remove-port {
+  padding: 1px 4px;
+  border: 0;
+  background: none;
+  color: #a34b3b;
+}
+.detail-upload {
+  display: grid;
+  gap: 3px;
+  font-size: 11px;
+}
+.detail-upload small {
+  color: #82917f;
+}
+.detail-file small {
+  white-space: nowrap;
+}
+.details-editor {
+  margin: 12px 0;
+  border: 1px solid #e0e7de;
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+.details-editor summary {
+  cursor: pointer;
+  font-weight: 600;
+}

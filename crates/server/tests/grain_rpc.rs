@@ -147,7 +147,7 @@ async fn run_scenario() {
         cache.load(&schema).unwrap();
         let id = <api::Client as capnp::traits::HasTypeId>::TYPE_ID;
         let interface = cache.interface(id).unwrap();
-        assert_eq!(interface.methods.len(), 16);
+        assert_eq!(interface.methods.len(), 19);
         assert!(
             interface
                 .methods

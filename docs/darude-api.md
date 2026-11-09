@@ -23,6 +23,8 @@ another session with broader access was opened.
 | `listLayers`, `putLayer`, `deleteLayer`                  | Manage connection layers                                            |
 | `listViews`, `putView`, `deleteView`                     | Manage saved perspectives                                           |
 | `putPorts`                                               | Set a thing's physical layout: faceplate kind and ports             |
+| `putProperties`                                          | Set a thing's details: text, link and file key/value properties     |
+| `uploadAttachment`, `getAttachment`                      | Store a file (photo, manual) as a Darude `Blob`, or fetch one       |
 
 Entity and connection listings accept `offset` and `limit` (default 100, maximum
 200), and return `nextOffset`, `hasMore`, and the inventory `revision`. Entity
@@ -167,6 +169,47 @@ Deleting a layer refuses while connections use it. Delete or reparent references
 explicitly first, or use a validated `putDocument` to make coordinated changes
 atomically. Missing inventory objects return `404`; deletes do not silently
 increment the revision for an absent object.
+
+## Details and attachments
+
+An entity's `properties` are ordered key/value details. Each has a `key` and
+exactly one of `text`, `link` (`url`, optional `title`; http, https or mailto),
+or `file` (a `FileRef`: `attachment`, `name`, `mimeType`, `size`). Like ports,
+they are returned with the entity and written by `putDocument`; `putEntity`
+keeps them, and `putProperties` replaces an entity's whole list.
+
+Files travel as Darude's shared `Blob` (`mimeType`, `fileName`, `data`), the
+same shape the agent loop shows models as images and documents. Store one with
+`uploadAttachment`, then put the returned `FileRef` in a `file` detail:
+
+```json
+{
+  "expectedRevision": 9,
+  "entity": "library-switch",
+  "properties": [
+    { "key": "IP address", "text": "192.168.1.244" },
+    { "key": "Model", "text": "Ubiquiti US-8-60W" },
+    {
+      "key": "Product page",
+      "link": { "url": "https://store.ui.com/", "title": "Ubiquiti store" }
+    },
+    {
+      "key": "Manual",
+      "file": {
+        "attachment": "<id from uploadAttachment>",
+        "name": "US8 quick start.pdf",
+        "mimeType": "application/pdf",
+        "size": 81234
+      }
+    }
+  ]
+}
+```
+
+Identical bytes return the same attachment (its ID is their SHA-256);
+`uploadAttachment` accepts at most 25 MiB and needs write. `getAttachment`
+returns the stored `Blob` and needs read. A detail may only name an uploaded
+attachment, and an upload no detail refers to is removed a day later.
 
 ## Saved views
 

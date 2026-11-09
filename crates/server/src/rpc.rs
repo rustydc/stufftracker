@@ -1,12 +1,14 @@
 //! App-owned Darude ABI v2 surface. No ambient HTTP credentials are used.
 use crate::stufftracker_v1_capnp as wire;
 use crate::{
-    App, SavedView, Snapshot, load_snapshot, load_views, remove_view, store_snapshot, store_view,
+    App, SavedView, Snapshot, load_attachment, load_snapshot, load_views, remove_view,
+    store_attachment, store_snapshot, store_view,
 };
 use capnp::capability::{FromClientHook, Promise};
 use std::rc::Rc;
 use stufftracker_core::{
-    Connection, Document, Endpoint, Entity, ExternalLink, Faceplate, Layer, Port, Protection, Role,
+    Connection, Document, Endpoint, Entity, ExternalLink, Faceplate, Layer, Port, Property,
+    PropertyValue, Protection, Role,
 };
 use wire::stuff_tracker_v1 as api;
 
@@ -52,7 +54,77 @@ fn entity_read(r: wire::entity::Reader<'_>) -> capnp::Result<Entity> {
             .collect::<capnp::Result<_>>()?,
         faceplate: faceplate_read(r.get_faceplate())?,
         ports: ports_read(r.get_ports()?)?,
+        properties: properties_read(r.get_properties()?)?,
     })
+}
+fn properties_read(
+    list: capnp::struct_list::Reader<'_, wire::property::Owned>,
+) -> capnp::Result<Vec<Property>> {
+    use wire::property::Which;
+    list.iter()
+        .map(|p| {
+            let value = match p.which().map_err(|_| invalid("Unknown detail kind"))? {
+                Which::Text(t) => PropertyValue::Text { text: text(t)? },
+                Which::Link(l) => {
+                    let l = l?;
+                    PropertyValue::Link {
+                        url: text(l.get_url())?,
+                        title: text(l.get_title())?,
+                    }
+                }
+                Which::File(f) => {
+                    let f = f?;
+                    PropertyValue::File {
+                        attachment: text(f.get_attachment())?,
+                        name: text(f.get_name())?,
+                        mime: text(f.get_mime_type())?,
+                        size: f.get_size(),
+                    }
+                }
+            };
+            Ok(Property {
+                key: text(p.get_key())?,
+                value,
+            })
+        })
+        .collect()
+}
+fn file_ref_write(mut b: wire::file_ref::Builder<'_>, a: &crate::Attachment) {
+    b.set_attachment(&a.attachment);
+    b.set_name(&a.name);
+    b.set_mime_type(&a.mime);
+    b.set_size(a.size);
+}
+fn properties_write(
+    mut list: capnp::struct_list::Builder<'_, wire::property::Owned>,
+    props: &[Property],
+) {
+    for (i, p) in props.iter().enumerate() {
+        let mut b = list.reborrow().get(i as u32);
+        b.set_key(&p.key);
+        match &p.value {
+            PropertyValue::Text { text } => b.set_text(text),
+            PropertyValue::Link { url, title } => {
+                let mut l = b.init_link();
+                l.set_url(url);
+                l.set_title(title);
+            }
+            PropertyValue::File {
+                attachment,
+                name,
+                mime,
+                size,
+            } => file_ref_write(
+                b.init_file(),
+                &crate::Attachment {
+                    attachment: attachment.clone(),
+                    name: name.clone(),
+                    mime: mime.clone(),
+                    size: *size,
+                },
+            ),
+        }
+    }
 }
 fn faceplate_read(
     f: Result<wire::Faceplate, capnp::NotInSchema>,
@@ -137,7 +209,8 @@ fn entity_write(mut b: wire::entity::Builder<'_>, e: &Entity) {
         b.set_external_id(&l.external_id);
     }
     b.set_faceplate(faceplate_wire(e.faceplate));
-    ports_write(b.init_ports(e.ports.len() as u32), &e.ports);
+    ports_write(b.reborrow().init_ports(e.ports.len() as u32), &e.ports);
+    properties_write(b.init_properties(e.properties.len() as u32), &e.properties);
 }
 fn connection_read(r: wire::connection::Reader<'_>) -> capnp::Result<Connection> {
     Ok(Connection {
@@ -357,13 +430,16 @@ impl api::Server for Api {
             let mut item = entity_read(p.get_entity()?)?;
             let revision = self.mutate(p.get_expected_revision(), move |d| {
                 if let Some(old) = d.entities.iter_mut().find(|e| e.id == item.id) {
-                    // Ports belong to putPorts: keep what is stored.
+                    // Ports and details belong to putPorts and
+                    // putProperties: keep what is stored.
                     item.faceplate = old.faceplate;
                     item.ports = std::mem::take(&mut old.ports);
+                    item.properties = std::mem::take(&mut old.properties);
                     *old = item;
                 } else {
                     item.faceplate = None;
                     item.ports.clear();
+                    item.properties.clear();
                     d.entities.push(item);
                 }
                 Ok(())
@@ -630,6 +706,63 @@ impl api::Server for Api {
             Ok(())
         })())
     }
+    fn put_properties(
+        &mut self,
+        params: api::PutPropertiesParams,
+        mut results: api::PutPropertiesResults,
+    ) -> Promise<(), capnp::Error> {
+        finish((|| {
+            self.check(true)?;
+            let p = params.get()?;
+            let id = text(p.get_entity())?;
+            let properties = properties_read(p.get_properties()?)?;
+            let revision = self.mutate(p.get_expected_revision(), move |d| {
+                d.entities
+                    .iter_mut()
+                    .find(|e| e.id == id)
+                    .ok_or_else(|| capnp::Error::failed("404: Entity not found".into()))?
+                    .properties = properties;
+                Ok(())
+            })?;
+            results.get().set_revision(revision);
+            Ok(())
+        })())
+    }
+    fn upload_attachment(
+        &mut self,
+        params: api::UploadAttachmentParams,
+        mut results: api::UploadAttachmentResults,
+    ) -> Promise<(), capnp::Error> {
+        finish((|| {
+            self.check(true)?;
+            let file = params.get()?.get_file()?;
+            let stored = store_attachment(
+                &self.app,
+                &text(file.get_file_name())?,
+                &text(file.get_mime_type())?,
+                file.get_data()?,
+            )
+            .map_err(error)?;
+            file_ref_write(results.get().init_attachment(), &stored);
+            Ok(())
+        })())
+    }
+    fn get_attachment(
+        &mut self,
+        params: api::GetAttachmentParams,
+        mut results: api::GetAttachmentResults,
+    ) -> Promise<(), capnp::Error> {
+        finish((|| {
+            self.check(false)?;
+            let id = text(params.get()?.get_id())?;
+            let (meta, data) = load_attachment(&self.app, &id).map_err(error)?;
+            let mut b = results.get().init_file();
+            b.set_mime_type(&meta.mime);
+            b.set_file_name(&meta.name);
+            b.set_data(&data);
+            Ok(())
+        })())
+    }
     fn put_ports(
         &mut self,
         params: api::PutPortsParams,
@@ -687,6 +820,7 @@ mod tests {
             }],
             faceplate: None,
             ports: Vec::new(),
+            properties: Vec::new(),
         }
     }
     #[tokio::test(flavor = "current_thread")]
@@ -713,6 +847,8 @@ mod tests {
         assert!(c.put_view_request().send().promise.await.is_err());
         assert!(c.delete_view_request().send().promise.await.is_err());
         assert!(c.put_ports_request().send().promise.await.is_err());
+        assert!(c.put_properties_request().send().promise.await.is_err());
+        assert!(c.upload_attachment_request().send().promise.await.is_err());
         assert_eq!(load_snapshot(&app).unwrap().revision, 1);
         for rights in [["write"], ["owner"]] {
             assert!(
@@ -724,6 +860,121 @@ mod tests {
                     .is_ok()
             );
         }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn details_and_blob_attachments() {
+        let app = app();
+        let c = client(&app, &["read", "write"]);
+        // Upload a manual as a Darude Blob; identical bytes, same attachment.
+        let pdf = b"%PDF-1.4 manual".to_vec();
+        let upload = |bytes: Vec<u8>| {
+            let mut req = c.upload_attachment_request();
+            let mut f = req.get().init_file();
+            f.set_mime_type("application/pdf");
+            f.set_file_name("US8 manual.pdf");
+            f.set_data(&bytes);
+            req.send().promise
+        };
+        let r = upload(pdf.clone()).await.unwrap();
+        let file = r.get().unwrap().get_attachment().unwrap();
+        let id = text(file.get_attachment()).unwrap();
+        assert!(stufftracker_core::is_attachment_id(&id));
+        assert_eq!(
+            (
+                file.get_size(),
+                text(file.get_mime_type()).unwrap().as_str()
+            ),
+            (15, "application/pdf")
+        );
+        let again = upload(pdf.clone()).await.unwrap();
+        assert_eq!(
+            text(
+                again
+                    .get()
+                    .unwrap()
+                    .get_attachment()
+                    .unwrap()
+                    .get_attachment()
+            )
+            .unwrap(),
+            id
+        );
+        // Text, link and file details on the router.
+        let props = vec![
+            Property {
+                key: "IP address".into(),
+                value: PropertyValue::Text {
+                    text: "192.168.1.1".into(),
+                },
+            },
+            Property {
+                key: "Docs".into(),
+                value: PropertyValue::Link {
+                    url: "https://example.com/us8".into(),
+                    title: "Product page".into(),
+                },
+            },
+            Property {
+                key: "Manual".into(),
+                value: PropertyValue::File {
+                    attachment: id.clone(),
+                    name: "US8 manual.pdf".into(),
+                    mime: "application/pdf".into(),
+                    size: 15,
+                },
+            },
+        ];
+        let mut req = c.put_properties_request();
+        req.get().set_expected_revision(1);
+        req.get().set_entity("router");
+        properties_write(req.get().init_properties(3), &props);
+        req.send().promise.await.unwrap();
+        // putEntity (which carries none) keeps them.
+        let mut req = c.get_entity_request();
+        req.get().set_id("router");
+        let got = req.send().promise.await.unwrap();
+        let mut router = entity_read(got.get().unwrap().get_entity().unwrap()).unwrap();
+        assert_eq!(router.properties, props);
+        router.name = "Core router".into();
+        router.properties.clear();
+        let mut req = c.put_entity_request();
+        req.get().set_expected_revision(2);
+        entity_write(req.get().init_entity(), &router);
+        req.send().promise.await.unwrap();
+        let doc = load_snapshot(&app).unwrap().document;
+        assert_eq!(
+            doc.entities
+                .iter()
+                .find(|e| e.id == "router")
+                .unwrap()
+                .properties,
+            props
+        );
+        // The bytes come back as a Blob; read shares may fetch them.
+        let r = client(&app, &["read"]);
+        let mut req = r.get_attachment_request();
+        req.get().set_id(&id);
+        let blob = req.send().promise.await.unwrap();
+        let f = blob.get().unwrap().get_file().unwrap();
+        assert_eq!(f.get_data().unwrap(), pdf.as_slice());
+        assert_eq!(text(f.get_file_name()).unwrap(), "US8 manual.pdf");
+        // A detail may not name an attachment that was never uploaded.
+        let mut req = c.put_properties_request();
+        req.get().set_expected_revision(3);
+        req.get().set_entity("router");
+        let mut bogus = props.clone();
+        bogus[2].value = PropertyValue::File {
+            attachment: "b".repeat(64),
+            name: "x".into(),
+            mime: "image/png".into(),
+            size: 1,
+        };
+        properties_write(req.get().init_properties(3), &bogus);
+        let err = req.send().promise.await.err().unwrap().to_string();
+        assert!(
+            err.contains("400") && err.contains("Unknown attachment"),
+            "{err}"
+        );
     }
     #[tokio::test(flavor = "current_thread")]
     async fn ports_round_trip_and_put_entity_keeps_them() {

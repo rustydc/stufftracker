@@ -4,6 +4,10 @@ fn main() {
     let schema = out.join("stufftracker-v1.schema.bin");
     capnpc::CompilerCommand::new()
         .file("stufftracker-v1.capnp")
+        // Darude's shared blob.capnp; its generated type lives in darude_wire,
+        // the one the runtime and agent loop use.
+        .import_path("../../vendor/darude/schemas")
+        .crate_provides("darude_wire", [0x88958d009b0f5516u64])
         .raw_code_generator_request_path(&schema)
         .run()
         .expect("compile stufftracker.v1 schema (requires capnp)");

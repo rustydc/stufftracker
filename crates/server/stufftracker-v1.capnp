@@ -1,5 +1,8 @@
 @0xc23890f6c80850ef;
 
+# Darude's shared binary payload (MIME type, file name, bytes).
+using Blob = import "/blob.capnp".Blob;
+
 # One StuffTracker inventory. Read or write grants permit reading; mutations need
 # write. Inventory writes compare expectedRevision atomically; refetch on conflict.
 interface StuffTrackerV1 {
@@ -35,6 +38,12 @@ interface StuffTrackerV1 {
   deleteView @14 (id :Text) -> ();
   # Set an entity's physical layout: its faceplate kind and full port list (switch ports, panel breakers, controller terminals). Replaces all its ports; refuses removing a port a connection endpoint still names. Requires write and the current revision.
   putPorts @15 (expectedRevision :UInt64, entity :Text, faceplate :Faceplate, ports :List(Port)) -> (revision :UInt64);
+  # Set an entity's details (key/value properties such as IP address, model, serial, manual, photo, product link) in display order, replacing them all. A file value names an attachment returned by uploadAttachment. putEntity keeps the stored details. Requires write and the current revision.
+  putProperties @16 (expectedRevision :UInt64, entity :Text, properties :List(Property)) -> (revision :UInt64);
+  # Store a file (a photo, a PDF manual, a datasheet) to use in a file detail, and get the FileRef to put in a Property. Identical bytes return the same attachment. At most 25 MiB. Requires write. An upload no detail refers to is dropped after a day.
+  uploadAttachment @17 (file :Blob) -> (attachment :FileRef);
+  # Fetch an attachment's bytes, MIME type and file name by its ID (FileRef.attachment). Requires read.
+  getAttachment @18 (id :Text) -> (file :Blob);
 }
 struct Entity {
   id @0 :Text;
@@ -47,6 +56,32 @@ struct Entity {
   faceplate @5 :Faceplate;
   # Physical attachment points; read-only here like faceplate.
   ports @6 :List(Port);
+  # Details (key/value properties) in display order. Read-only here: putEntity keeps the stored details; change them with putProperties.
+  properties @7 :List(Property);
+}
+struct Property {
+  # What it is, as shown: "IP address", "Model", "Serial", "Manual", "Photo".
+  key @0 :Text;
+  union {
+    # Plain text: an address, a model number, a note.
+    text @1 :Text;
+    # A link for more information (http, https or mailto).
+    link @2 :Link;
+    # An uploaded file (from uploadAttachment): images show as pictures, PDFs open.
+    file @3 :FileRef;
+  }
+}
+struct Link {
+  url @0 :Text;
+  # Optional text to show instead of the address.
+  title @1 :Text;
+}
+struct FileRef {
+  # The attachment's ID (its SHA-256), as uploadAttachment returned it.
+  attachment @0 :Text;
+  name @1 :Text;
+  mimeType @2 :Text;
+  size @3 :UInt64;
 }
 enum Faceplate {
   # No physical layout.
