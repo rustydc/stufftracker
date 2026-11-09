@@ -34,6 +34,9 @@
               placeholder="Find a space or thing…"
               aria-label="Search inventory"
           /></label>
+          <button id="search-show" class="search-show" hidden>
+            Show matches on canvas
+          </button>
           <div id="tree"></div>
           <div class="sidebar-bottom">
             <span class="status-dot"></span> Independent hierarchy<br /><small
@@ -50,6 +53,8 @@
             <div class="toolbar-actions">
               <select id="views" aria-label="Saved views">
                 <option value="">Unsaved view</option></select
+              ><button id="filter" title="Show things by their details">
+                Filter</button
               ><button id="save-view">Save view</button>
             </div>
           </div>
@@ -70,6 +75,7 @@
               <rect id="lasso" class="lasso" visibility="hidden" />
             </svg>
             <div id="focus-bar" class="float-bar" hidden></div>
+            <div id="filter-panel" class="filter-panel" hidden></div>
             <div id="pick-bar" class="float-bar pick" hidden></div>
             <section
               id="sheet"

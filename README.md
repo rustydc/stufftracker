@@ -47,6 +47,14 @@ automation. Subsequent boots preserve your data.
   address, a model or serial number), a link for more information, or a file
   (a photo, a PDF manual) uploaded from your device. They show in the
   inspector, and search finds things by them.
+- **Filters.** **Filter** (beside the saved views) shows only the things whose
+  details match: pick a detail key (or Name, Kind, Any field), a test
+  (contains, is, has, doesn't have) and a value, and combine conditions with
+  all or any, with a live count of matches. Clicking a detail's key in the
+  inspector shows everything with that key, ⧉ beside a value everything with
+  the same value, and **Show matches on canvas** under the inventory search
+  shows what the search finds. A filter is a focus: the focus bar widens it to
+  the matches' neighbours (Only, 1, 2, 3, All hops), and it saves with a view.
 - **Physical layouts.** A thing can carry ports: switch ports, breaker-panel
   spaces, or controller terminals. Edit them under **Physical layout & ports**:
   pick a layout (breaker panel, network switch, terminal strip), add ports one

@@ -244,6 +244,34 @@ feed). For example, everything fed by the barn panel, drawn as a faceplate:
 }
 ```
 
+A focus may also carry a `filter`, and then starts from every thing it matches
+(as well as any `entities`): `conditions`, each `{key, op, value}`, all of
+which must match (or any, with `"any": true`). `key` is a detail key (matched
+case-insensitively), or `@name`, `@kind` or `@any` (name, kind and every
+detail); `op` is `contains` or `equals` (case-insensitive), or `exists` /
+`missing` for a detail key. Text values compare their text, links their URL
+and title, files their name and MIME type. For example, every networked
+thing without a model recorded:
+
+```json
+{
+  "layout_version": 2,
+  "positions": {},
+  "collapsed": [],
+  "hidden_layers": [],
+  "focus": {
+    "entities": [],
+    "hops": 0,
+    "filter": {
+      "conditions": [
+        { "key": "IP address", "op": "exists" },
+        { "key": "Model", "op": "missing" }
+      ]
+    }
+  }
+}
+```
+
 A focused view starts with a compact layout of its own. Its arrangement lives
 in `focus.positions` (parent-relative, like `positions`), which dragging within
 the focus changes; the view's `positions` are the full view's and are left

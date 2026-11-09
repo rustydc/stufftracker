@@ -1,4 +1,9 @@
-import init, { compute, move_node, preview } from "./pkg/stufftracker_core";
+import init, {
+  compute,
+  matching,
+  move_node,
+  preview,
+} from "./pkg/stufftracker_core";
 declare const WASM_BASE64: string;
 declare const WORKER_SOURCE: string;
 type Point = { x: number; y: number };
@@ -47,7 +52,11 @@ type Connection = {
   endpoints: Endpoint[];
 };
 type Direction = "both" | "upstream" | "downstream";
+type Op = "contains" | "equals" | "exists" | "missing";
+type Condition = { key: string; op: Op; value?: string };
+type Filter = { conditions: Condition[]; any?: boolean };
 type Focus = {
+  filter?: Filter;
   entities: string[];
   hops?: number;
   direction?: Direction;
@@ -176,18 +185,186 @@ function setFocus(focus: Focus | null) {
 }
 const nameOf = (id: string) =>
   doc.entities.find((e) => e.id === id)?.name || id;
+// --- Filters: show only the things whose details match -------------------
+const OPS: Record<Op, string> = {
+  contains: "contains",
+  equals: "is",
+  exists: "has",
+  missing: "doesn't have",
+};
+const FIELD_NAMES: Record<string, string> = {
+  "@any": "Any field",
+  "@name": "Name",
+  "@kind": "Kind",
+};
+const fieldName = (key: string) => FIELD_NAMES[key] || key;
+const conditionReady = (c: Condition) =>
+  c.op === "exists" || c.op === "missing" || !!(c.value || "").trim();
+function describeFilter(f: Filter) {
+  return f.conditions
+    .map((c) =>
+      c.op === "exists" || c.op === "missing"
+        ? `${OPS[c.op]} ${fieldName(c.key)}`
+        : `${fieldName(c.key)} ${OPS[c.op]} "${c.value || ""}"`,
+    )
+    .join(f.any ? " or " : " and ");
+}
+const matchingIds = (filter: Filter): string[] =>
+  JSON.parse(matching(JSON.stringify({ document: doc, filter })));
+function showMatching(filter: Filter) {
+  setFocus({ entities: [], hops: 0, direction: "both", filter });
+}
+// The filter being edited in the panel, until shown.
+let filterDraft: Filter | null = null;
+function openFilterPanel() {
+  filterDraft = structuredClone(
+    view.focus?.filter || {
+      conditions: [{ key: "@any", op: "contains", value: "" }],
+    },
+  );
+  renderFilterPanel();
+}
+function filterCount(f: Filter) {
+  const live = f.conditions.filter(conditionReady);
+  const n = live.length ? matchingIds({ ...f, conditions: live }).length : 0;
+  return {
+    live: live.length,
+    n,
+    text: live.length ? `${n} match${n === 1 ? "" : "es"}` : "",
+  };
+}
+function renderFilterPanel() {
+  const panel = $("filter-panel");
+  panel.hidden = !filterDraft;
+  if (!filterDraft) return;
+  const f = filterDraft;
+  // Every detail key in the inventory, most used first.
+  const counts = new Map<string, number>();
+  for (const e of doc.entities)
+    for (const p of e.properties || [])
+      counts.set(p.key, (counts.get(p.key) || 0) + 1);
+  const keys = [...counts]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([k]) => k);
+  const count = filterCount(f);
+  panel.innerHTML = `<div class="filter-head"><b>Show things where</b><span class="seg" role="group" aria-label="Match"><button data-any="false" class="${f.any ? "" : "on"}">all</button><button data-any="true" class="${f.any ? "on" : ""}">any</button></span><span class="muted">match</span><button class="filter-close" aria-label="Close filter">✕</button></div>${f.conditions
+    .map((c, i) => {
+      const special = c.key.startsWith("@");
+      const options = [
+        ...Object.keys(FIELD_NAMES),
+        ...keys,
+        ...(special || keys.includes(c.key) ? [] : [c.key]),
+      ];
+      return `<div class="filter-row" data-cond="${i}"><select data-field="key" aria-label="Field">${options.map((k) => `<option value="${esc(k)}" ${k === c.key ? "selected" : ""}>${esc(fieldName(k))}</option>`).join("")}</select><select data-field="op" aria-label="Test">${(
+        Object.keys(OPS) as Op[]
+      )
+        .filter((op) => !special || op === "contains" || op === "equals")
+        .map(
+          (op) =>
+            `<option value="${op}" ${op === c.op ? "selected" : ""}>${OPS[op]}</option>`,
+        )
+        .join(
+          "",
+        )}</select>${c.op === "exists" || c.op === "missing" ? "<span></span>" : `<input data-field="value" value="${esc(c.value || "")}" placeholder="value" aria-label="Value">`}<button class="remove-cond" aria-label="Remove condition">✕</button></div>`;
+    })
+    .join(
+      "",
+    )}<div class="filter-foot"><button id="add-cond">＋ Condition</button><span class="filter-count">${count.text}</span><button id="apply-filter" class="primary" ${count.n ? "" : "disabled"}>Show matches</button></div>`;
+  panel.querySelector<HTMLButtonElement>(".filter-close")!.onclick = () => {
+    filterDraft = null;
+    renderFilterPanel();
+  };
+  panel.querySelectorAll<HTMLButtonElement>("[data-any]").forEach(
+    (b) =>
+      (b.onclick = () => {
+        f.any = b.dataset.any === "true";
+        renderFilterPanel();
+      }),
+  );
+  panel.querySelectorAll<HTMLElement>(".filter-row").forEach((row) => {
+    const i = Number(row.dataset.cond);
+    const c = f.conditions[i];
+    row.querySelector<HTMLSelectElement>('[data-field="key"]')!.onchange = (
+      ev,
+    ) => {
+      c.key = (ev.target as HTMLSelectElement).value;
+      if (c.key.startsWith("@") && (c.op === "exists" || c.op === "missing"))
+        c.op = "contains";
+      renderFilterPanel();
+    };
+    row.querySelector<HTMLSelectElement>('[data-field="op"]')!.onchange = (
+      ev,
+    ) => {
+      c.op = (ev.target as HTMLSelectElement).value as Op;
+      renderFilterPanel();
+    };
+    const input = row.querySelector<HTMLInputElement>('[data-field="value"]');
+    if (input) {
+      // Update the count without redrawing (which would lose the caret).
+      input.oninput = () => {
+        c.value = input.value;
+        const now = filterCount(f);
+        panel.querySelector(".filter-count")!.textContent = now.text;
+        panel.querySelector<HTMLButtonElement>("#apply-filter")!.disabled =
+          !now.n;
+      };
+      input.onkeydown = (ev) => {
+        if (ev.key === "Enter") $("apply-filter").click();
+      };
+    }
+    row.querySelector<HTMLButtonElement>(".remove-cond")!.onclick = () => {
+      f.conditions.splice(i, 1);
+      if (!f.conditions.length)
+        f.conditions.push({ key: "@any", op: "contains", value: "" });
+      renderFilterPanel();
+    };
+  });
+  $("add-cond").onclick = () => {
+    f.conditions.push(
+      keys.length
+        ? { key: keys[0], op: "exists" }
+        : { key: "@any", op: "contains", value: "" },
+    );
+    renderFilterPanel();
+  };
+  $("apply-filter").onclick = () => {
+    const conditions = f.conditions
+      .filter(conditionReady)
+      .map((c) =>
+        c.op === "exists" || c.op === "missing"
+          ? { key: c.key, op: c.op }
+          : { ...c, value: c.value!.trim() },
+      );
+    if (!conditions.length) return;
+    filterDraft = null;
+    renderFilterPanel();
+    showMatching({ conditions, ...(f.any ? { any: true } : {}) });
+  };
+}
 function renderBars() {
   const f = view.focus;
   const bar = $("focus-bar");
   bar.hidden = !f;
   if (f) {
     const names = f.entities.map(nameOf);
-    const what =
+    const what = [
+      ...(f.filter ? [describeFilter(f.filter)] : []),
       names.length > 2
         ? `${names.slice(0, 2).join(", ")} +${names.length - 2}`
-        : names.join(", ");
+        : names.join(", "),
+    ]
+      .filter(Boolean)
+      .join(" + ");
     const dir = f.direction || "both";
-    bar.innerHTML = `<span class="focus-label">${dir === "upstream" ? "What feeds" : dir === "downstream" ? "What is fed by" : "Around"} <b>${esc(what)}</b> · ${current.nodes.filter((n) => !n.container || n.collapsed).length} shown</span><span class="seg" role="group" aria-label="Direction">${(["both", "upstream", "downstream"] as const).map((d) => `<button data-dir="${d}" class="${d === dir ? "on" : ""}">${{ both: "↔ Both", upstream: "↑ Feeds", downstream: "↓ Fed" }[d]}</button>`).join("")}</span><span class="seg" role="group" aria-label="Hops">${[1, 2, 3, 0].map((h) => `<button data-hops="${h}" class="${(f.hops ?? 0) === h ? "on" : ""}">${h || "All"}</button>`).join("")}</span><button id="exit-focus">✕ Show everything</button>`;
+    const lead =
+      f.filter && !f.hops
+        ? "Matching"
+        : dir === "upstream"
+          ? "What feeds"
+          : dir === "downstream"
+            ? "What is fed by"
+            : "Around";
+    bar.innerHTML = `<span class="focus-label">${lead} <b>${esc(what)}</b> · ${current.nodes.filter((n) => !n.container || n.collapsed).length} shown</span><span class="seg" role="group" aria-label="Direction">${(["both", "upstream", "downstream"] as const).map((d) => `<button data-dir="${d}" class="${d === dir ? "on" : ""}">${{ both: "↔ Both", upstream: "↑ Feeds", downstream: "↓ Fed" }[d]}</button>`).join("")}</span><span class="seg" role="group" aria-label="Hops">${(["0", "1", "2", "3", "all"] as const).map((h) => `<button data-hops="${h}" class="${String(f.hops ?? "all") === h ? "on" : ""}" title="${h === "0" ? "Only these things" : h === "all" ? "Everything connected" : `${h} connection${h === "1" ? "" : "s"} away`}">${h === "0" ? "Only" : h === "all" ? "All" : h}</button>`).join("")}</span><button id="exit-focus">✕ Show everything</button>`;
     bar.querySelectorAll<HTMLButtonElement>("[data-dir]").forEach(
       (b) =>
         (b.onclick = () =>
@@ -201,7 +378,7 @@ function renderBars() {
         (b.onclick = () =>
           setFocus({
             ...view.focus!,
-            hops: Number(b.dataset.hops) || undefined,
+            hops: b.dataset.hops === "all" ? undefined : Number(b.dataset.hops),
           })),
     );
     $("exit-focus").onclick = () => setFocus(null);
@@ -833,7 +1010,7 @@ function detailsHtml(e: Entity) {
   if (!e.properties?.length) return "";
   const value = (p: Property) => {
     if (p.type === "text")
-      return `<span class="detail-text">${esc(p.text)}</span>`;
+      return `<span class="detail-text">${esc(p.text)}</span><button class="same" data-same-key="${esc(p.key)}" data-same-value="${esc(p.text)}" title="Show everything whose ${esc(p.key)} is ${esc(p.text)}" aria-label="Show everything with this ${esc(p.key)}">⧉</button>`;
     if (p.type === "link")
       return `<a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${esc(p.title || p.url)}</a>`;
     // The offline export carries no attachments, only their names.
@@ -845,7 +1022,10 @@ function detailsHtml(e: Entity) {
       : `<a href="${url}" target="_blank" rel="noopener" class="detail-file">📄 ${esc(p.name)} <small>${sizeText(p.size)}</small></a>`;
   };
   return `<div class="details-list"><h3>Details</h3><dl>${e.properties
-    .map((p) => `<dt>${esc(p.key)}</dt><dd>${value(p)}</dd>`)
+    .map(
+      (p) =>
+        `<dt><button class="same-key" data-has-key="${esc(p.key)}" title="Show everything with a ${esc(p.key)}">${esc(p.key)}</button></dt><dd>${value(p)}</dd>`,
+    )
     .join("")}</dl></div>`;
 }
 // Details are drafted in the editor until applied, like ports.
@@ -994,6 +1174,30 @@ function wireEntityActions(root: HTMLElement, e: Entity) {
     };
   const print = root.querySelector<HTMLButtonElement>(".print-schedule");
   if (print) print.onclick = () => printSchedule(e);
+  root.querySelectorAll<HTMLButtonElement>("[data-same-key]").forEach(
+    (b) =>
+      (b.onclick = () => {
+        sheetId = null;
+        showMatching({
+          conditions: [
+            {
+              key: b.dataset.sameKey!,
+              op: "equals",
+              value: b.dataset.sameValue!,
+            },
+          ],
+        });
+      }),
+  );
+  root.querySelectorAll<HTMLButtonElement>("[data-has-key]").forEach(
+    (b) =>
+      (b.onclick = () => {
+        sheetId = null;
+        showMatching({
+          conditions: [{ key: b.dataset.hasKey!, op: "exists" }],
+        });
+      }),
+  );
 }
 // Phones have no inspector column: tapping a thing opens this sheet instead.
 let sheetId: string | null = null;
@@ -1500,7 +1704,22 @@ $("layers").onchange = (ev) => {
     : [...view.hidden_layers, id];
   render();
 };
-$("search").oninput = renderTree;
+$("search").oninput = () => {
+  renderTree();
+  $("search-show").hidden = !$<HTMLInputElement>("search").value.trim();
+};
+$("search-show").onclick = () =>
+  showMatching({
+    conditions: [
+      {
+        key: "@any",
+        op: "contains",
+        value: $<HTMLInputElement>("search").value.trim(),
+      },
+    ],
+  });
+$("filter").onclick = () =>
+  filterDraft ? ((filterDraft = null), renderFilterPanel()) : openFilterPanel();
 $("select-mode").onclick = () => setSelectMode(!selectMode);
 $("fit").onclick = fit;
 $("zoom-in").onclick = () => zoom(1.2);

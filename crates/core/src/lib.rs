@@ -231,6 +231,85 @@ pub struct Focus {
     /// view's positions are never changed from a focus.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub positions: BTreeMap<String, Point>,
+    /// Also start from every thing matching this filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Filter>,
+}
+/// Which things match: by their details, name or kind.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Filter {
+    pub conditions: Vec<Condition>,
+    /// Match any condition rather than all of them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub any: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Condition {
+    /// A detail key ("Model"), or `@name`, `@kind`, or `@any` (the name,
+    /// kind and every detail).
+    pub key: String,
+    pub op: Op,
+    /// Compared case-insensitively; unused by `exists` and `missing`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Op {
+    Contains,
+    Equals,
+    /// Has a detail with this key (any value).
+    Exists,
+    /// Has no detail with this key.
+    Missing,
+}
+impl Property {
+    /// The text a filter compares: a text value, a link's address and
+    /// title, a file's name and type.
+    pub fn search_text(&self) -> String {
+        match &self.value {
+            PropertyValue::Text { text } => text.clone(),
+            PropertyValue::Link { url, title } => format!("{url} {title}"),
+            PropertyValue::File { name, mime, .. } => format!("{name} {mime}"),
+        }
+    }
+}
+/// Whether `e` satisfies `filter`. An empty filter matches nothing.
+pub fn matches(e: &Entity, filter: &Filter) -> bool {
+    let test = |c: &Condition| {
+        let want = c.value.trim().to_lowercase();
+        let values: Vec<String> = match c.key.as_str() {
+            "@name" => vec![e.name.clone()],
+            "@kind" => vec![e.kind.clone()],
+            "@any" => [e.name.clone(), e.kind.clone()]
+                .into_iter()
+                .chain(
+                    e.properties
+                        .iter()
+                        .flat_map(|p| [p.key.clone(), p.search_text()]),
+                )
+                .collect(),
+            key => e
+                .properties
+                .iter()
+                .filter(|p| p.key.trim().eq_ignore_ascii_case(key.trim()))
+                .map(Property::search_text)
+                .collect(),
+        };
+        match c.op {
+            Op::Exists => !values.is_empty(),
+            Op::Missing => values.is_empty(),
+            Op::Equals => values.iter().any(|v| v.trim().to_lowercase() == want),
+            Op::Contains => values.iter().any(|v| v.to_lowercase().contains(&want)),
+        }
+    };
+    if filter.conditions.is_empty() {
+        false
+    } else if filter.any {
+        filter.conditions.iter().any(test)
+    } else {
+        filter.conditions.iter().all(test)
+    }
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -548,10 +627,16 @@ pub fn validate_view(view: &View) -> Result<(), String> {
         return Err("Invalid coordinates".into());
     }
     if view.faceplates.len() > 500
-        || view
-            .focus
-            .as_ref()
-            .is_some_and(|f| f.entities.len() > 500 || f.hops.is_some_and(|h| h > 50))
+        || view.focus.as_ref().is_some_and(|f| {
+            f.entities.len() > 500
+                || f.hops.is_some_and(|h| h > 50)
+                || f.filter.as_ref().is_some_and(|f| {
+                    f.conditions.len() > 20
+                        || f.conditions
+                            .iter()
+                            .any(|c| c.key.len() > 80 || c.value.len() > 200)
+                })
+        })
     {
         return Err("View focus or faceplates out of range".into());
     }
@@ -1021,6 +1106,13 @@ pub fn focus_set(doc: &Document, view: &View, focus: &Focus) -> BTreeSet<String>
         .iter()
         .filter(|id| exists.contains(id.as_str()))
         .cloned()
+        .chain(
+            focus
+                .filter
+                .iter()
+                .flat_map(|f| doc.entities.iter().filter(move |e| matches(e, f)))
+                .map(|e| e.id.clone()),
+        )
         .collect();
     loop {
         let inside: Vec<String> = doc
@@ -3393,6 +3485,24 @@ fn route(
     }
     simple
 }
+#[derive(Deserialize)]
+struct MatchRequest {
+    document: Document,
+    filter: Filter,
+}
+/// The IDs of the things a filter matches, in inventory order.
+#[wasm_bindgen]
+pub fn matching(input: &str) -> Result<String, JsError> {
+    let r: MatchRequest = serde_json::from_str(input)?;
+    let ids: Vec<&str> = r
+        .document
+        .entities
+        .iter()
+        .filter(|e| matches(e, &r.filter))
+        .map(|e| e.id.as_str())
+        .collect();
+    Ok(serde_json::to_string(&ids)?)
+}
 #[wasm_bindgen]
 pub fn compute(input: &str) -> Result<String, JsError> {
     let request: LayoutRequest = serde_json::from_str(input)?;
@@ -4864,6 +4974,140 @@ mod tests {
         );
     }
     #[test]
+    fn filters_match_details_name_and_kind_and_drive_a_focus() {
+        let mut doc = sample();
+        let text = |k: &str, v: &str| Property {
+            key: k.into(),
+            value: PropertyValue::Text { text: v.into() },
+        };
+        let set = |doc: &mut Document, id: &str, props: Vec<Property>| {
+            doc.entities
+                .iter_mut()
+                .find(|e| e.id == id)
+                .unwrap()
+                .properties = props;
+        };
+        set(
+            &mut doc,
+            "router",
+            vec![
+                text("Model", "Ubiquiti US-8-60W"),
+                text("IP address", "192.168.1.244"),
+            ],
+        );
+        set(
+            &mut doc,
+            "tv",
+            vec![text("model", "LG C3"), text("IP address", "192.168.1.50")],
+        );
+        set(
+            &mut doc,
+            "ha",
+            vec![Property {
+                key: "Manual".into(),
+                value: PropertyValue::Link {
+                    url: "https://www.home-assistant.io/docs".into(),
+                    title: String::new(),
+                },
+            }],
+        );
+        let cond = |key: &str, op: Op, value: &str| Condition {
+            key: key.into(),
+            op,
+            value: value.into(),
+        };
+        let found = |f: Filter| -> Vec<String> {
+            let mut v: Vec<_> = doc
+                .entities
+                .iter()
+                .filter(|e| matches(e, &f))
+                .map(|e| e.id.clone())
+                .collect();
+            v.sort();
+            v
+        };
+        let all = |c: Vec<Condition>| Filter {
+            conditions: c,
+            any: false,
+        };
+        // Keys match case-insensitively; values by substring or exactly.
+        assert_eq!(
+            found(all(vec![cond("MODEL", Op::Contains, "us-8")])),
+            ["router"]
+        );
+        assert_eq!(
+            found(all(vec![cond("IP address", Op::Contains, "192.168.1.")])),
+            ["router", "tv"]
+        );
+        assert_eq!(found(all(vec![cond("Model", Op::Equals, "lg c3")])), ["tv"]);
+        assert!(found(all(vec![cond("Model", Op::Equals, "LG")])).is_empty());
+        // Presence and absence of a detail.
+        assert_eq!(found(all(vec![cond("Manual", Op::Exists, "")])), ["ha"]);
+        assert_eq!(
+            found(all(vec![
+                cond("IP address", Op::Exists, ""),
+                cond("Model", Op::Contains, "lg")
+            ])),
+            ["tv"]
+        );
+        let devices_without_ip = found(all(vec![
+            cond("@kind", Op::Equals, "device"),
+            cond("IP address", Op::Missing, ""),
+        ]));
+        assert!(
+            devices_without_ip.contains(&"lamp".to_string())
+                && !devices_without_ip.contains(&"tv".to_string())
+        );
+        // Name, any field, and any-of.
+        assert_eq!(
+            found(all(vec![cond("@name", Op::Contains, "router")])),
+            ["router"]
+        );
+        assert_eq!(
+            found(all(vec![cond("@any", Op::Contains, "home-assistant.io")])),
+            ["ha"]
+        );
+        assert_eq!(
+            found(Filter {
+                conditions: vec![
+                    cond("Model", Op::Contains, "lg"),
+                    cond("Manual", Op::Exists, "")
+                ],
+                any: true
+            }),
+            ["ha", "tv"]
+        );
+        assert!(
+            found(Filter::default()).is_empty(),
+            "an empty filter matches nothing"
+        );
+
+        // As a focus: the matches (plus their rooms), then hops outward.
+        let (mut view, _) = settled(&doc);
+        view.focus = Some(Focus {
+            entities: Vec::new(),
+            hops: Some(0),
+            direction: Direction::Both,
+            positions: BTreeMap::new(),
+            filter: Some(all(vec![cond("IP address", Op::Exists, "")])),
+        });
+        let l = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: view.clone(),
+        })
+        .unwrap();
+        let leaves: BTreeSet<_> = l
+            .nodes
+            .iter()
+            .filter(|n| !n.container)
+            .map(|n| n.id.as_str())
+            .collect();
+        assert_eq!(leaves, ["router", "tv"].into_iter().collect());
+        view.focus.as_mut().unwrap().hops = Some(1);
+        let wider = focus_set(&doc, &view, view.focus.as_ref().unwrap());
+        assert!(wider.contains("desk") && wider.contains("panel"));
+    }
+    #[test]
     fn a_focus_keeps_its_own_arrangement() {
         let doc = sample();
         let (full, _) = settled(&doc);
@@ -4873,6 +5117,7 @@ mod tests {
             hops: Some(0),
             direction: Direction::Both,
             positions: BTreeMap::new(),
+            filter: None,
         });
         let req = |view: &View| LayoutRequest {
             document: doc.clone(),
@@ -4951,6 +5196,7 @@ mod tests {
             hops: Some(1),
             direction: Direction::Both,
             positions: BTreeMap::new(),
+            filter: None,
         });
         assert_eq!(
             set,
@@ -4974,6 +5220,7 @@ mod tests {
             hops: None,
             direction: Direction::Upstream,
             positions: BTreeMap::new(),
+            filter: None,
         });
         assert_eq!(
             set,
@@ -4988,6 +5235,7 @@ mod tests {
             hops: None,
             direction: Direction::Downstream,
             positions: BTreeMap::new(),
+            filter: None,
         });
         assert_eq!(
             set,
@@ -5002,6 +5250,7 @@ mod tests {
             hops: Some(0),
             direction: Direction::Both,
             positions: BTreeMap::new(),
+            filter: None,
         });
         assert_eq!(
             set,

@@ -112,6 +112,78 @@ try {
   );
   await page.locator("#search").fill("");
 
+  // Filters: show only the things whose details match.
+  const leaves = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll(".node:not(.space)")]
+        .map((n) => n.dataset.id)
+        .sort(),
+    );
+  await page.locator("#filter").click();
+  const cond = page.locator(".filter-row").first();
+  await cond.locator('[data-field="key"]').selectOption("IP address");
+  await cond.locator('[data-field="op"]').selectOption("exists");
+  assert.equal(await page.locator(".filter-count").textContent(), "1 match");
+  await page.locator("#apply-filter").click();
+  await page.waitForSelector("#focus-bar:not([hidden])");
+  assert.match(
+    await page.locator("#focus-bar .focus-label").textContent(),
+    /Matching has IP address/,
+  );
+  assert.deepEqual(await leaves(), ["router"]);
+  assert.equal(
+    await page.locator('#focus-bar [data-hops="0"]').getAttribute("class"),
+    "on",
+  );
+  await page.locator('#focus-bar [data-hops="1"]').click();
+  assert((await leaves()).length > 3, "one hop brings the router's neighbours");
+  await page.locator("#exit-focus").click();
+  // Typing a value counts matches live; "contains" on any field.
+  await page.locator("#filter").click();
+  await page.locator('.filter-row [data-field="value"]').fill("ubiquiti");
+  assert.equal(await page.locator(".filter-count").textContent(), "1 match");
+  await page.locator('.filter-row [data-field="value"]').fill("zzz");
+  assert.equal(await page.locator(".filter-count").textContent(), "0 matches");
+  assert(await page.locator("#apply-filter").isDisabled());
+  await page.locator(".filter-close").click();
+  // From the details: a key shows everything with it, ⧉ everything with
+  // the same value.
+  await page.locator('.tree-row[data-select="router"]').click();
+  await page.locator('#inspector [data-has-key="IP address"]').click();
+  assert.deepEqual(await leaves(), ["router"]);
+  await page.locator("#exit-focus").click();
+  await page.locator('.tree-row[data-select="router"]').click();
+  await page.locator('#inspector [data-same-key="IP address"]').click();
+  assert.match(
+    await page.locator("#focus-bar .focus-label").textContent(),
+    /IP address is "192.168.1.1"/,
+  );
+  // A filtered view saves and comes back.
+  await page.locator("#save-view").click();
+  await page.locator("#view-name").fill("Has an IP");
+  await page.locator("#view-form button.primary").click();
+  await page.waitForFunction(() =>
+    document.querySelector("#status").textContent.includes("View saved"),
+  );
+  await page.locator("#exit-focus").click();
+  await page.reload();
+  await page.waitForFunction(() =>
+    document.querySelector("#status").textContent.includes("SQLite connected"),
+  );
+  await page.locator("#views").selectOption({ label: "Has an IP" });
+  await page.waitForSelector("#focus-bar:not([hidden])");
+  assert.deepEqual(await leaves(), ["router"]);
+  await page.locator("#exit-focus").click();
+  // The inventory search can put its matches on the canvas.
+  await page.locator("#search").fill("192.168");
+  await page.locator("#search-show").click();
+  assert.deepEqual(await leaves(), ["router"]);
+  await page.locator("#exit-focus").click();
+  await page.locator("#search").fill("");
+  for (const v of await (await page.request.get(`${base}api/views`)).json())
+    if (v.name === "Has an IP")
+      await page.request.delete(`${base}api/views/${v.id}`);
+
   // A read-only share sees the details but no editor.
   const ro = await browser.newPage();
   await ro.route("**/api/session", (r) =>
@@ -127,7 +199,7 @@ try {
   await ro.close();
   assert.deepEqual(errors, []);
   console.log(
-    "Details checks passed: text, link, image and PDF details, upload and save, serving headers, search, read-only view.",
+    "Details checks passed: text, link, image and PDF details, upload and save, serving headers, filters (panel, keys, values, hops, saved view), search, read-only view.",
   );
 } finally {
   if (original) {

@@ -1145,3 +1145,104 @@ label.toggle {
   cursor: pointer;
   font-weight: 600;
 }
+/* Filter panel: show things by their details. */
+.filter-panel {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: min(460px, calc(100% - 24px));
+  background: #fff;
+  border: 1px solid #d6dfd5;
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(38, 61, 52, 0.16);
+  padding: 10px 12px;
+  z-index: 3;
+  font-size: 12px;
+}
+.filter-panel[hidden] {
+  display: none;
+}
+.filter-head,
+.filter-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.filter-head .filter-close {
+  margin-left: auto;
+  padding: 3px 8px;
+}
+.filter-head .seg button,
+.filter-foot button {
+  padding: 4px 9px;
+}
+.filter-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.9fr) minmax(0, 1.3fr) 24px;
+  gap: 4px;
+  margin: 6px 0;
+  align-items: center;
+}
+.filter-row select,
+.filter-row input {
+  width: 100%;
+  min-width: 0;
+  font-size: 12px;
+  padding: 4px 5px;
+  border: 1px solid #d6dfd5;
+  border-radius: 5px;
+}
+.filter-row .remove-cond {
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: #a34b3b;
+}
+.filter-foot {
+  margin-top: 8px;
+}
+.filter-count {
+  margin-left: auto;
+  color: #4b6152;
+  font-weight: 600;
+}
+.filter-foot .primary {
+  background: #2f6b4d;
+  color: #fff;
+  border-color: #2f6b4d;
+}
+.filter-foot .primary:disabled {
+  opacity: 0.45;
+}
+.search-show {
+  margin: -4px 16px 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.search-show[hidden] {
+  display: none;
+}
+/* Details: a key shows everything with that key; ⧉ everything with that value. */
+.details-list dt .same-key {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.details-list dt .same-key:hover {
+  text-decoration: underline;
+}
+.details-list .same {
+  border: 0;
+  background: none;
+  padding: 0 0 0 6px;
+  color: #9aa793;
+  cursor: pointer;
+  font-size: 12px;
+}
+.details-list .same:hover {
+  color: #2f6b4d;
+}
