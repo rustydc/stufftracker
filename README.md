@@ -112,9 +112,12 @@ automation. Subsequent boots preserve your data.
   on its side (a 240 V breaker is 2), and tandem halves share one space. A
   linked breaker that changes half between spaces takes one half per space
   (type `B/A` for 7B/9A; a quad is 1A/3B plus 1B/3A), and non-adjacent spaces
-  are drawn tied together. Type `main` as the position for a supply (main
-  breaker, main lugs, uplink): it gets its own row on top, where incoming
-  feeds land.
+  are drawn tied together. Type `main` as the position for a supply with no
+  space of its own (main breaker, main lugs): it gets its own row on top,
+  where incoming feeds land. A supply that has a position (a switch's uplink
+  port, a breaker back-fed from a generator) stays in place: give it its
+  number and tick **Supply**; it's marked with a caret on a switch, ▲ on a
+  panel.
   Connections are assigned a port from the inspector's connection list. The
   inspector shows the port schedule (printable), and **Show physical layout**
   draws the thing as its faceplate, with each wire leaving from its own port

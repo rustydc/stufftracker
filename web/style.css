@@ -1023,7 +1023,7 @@ label.toggle {
 }
 .port-row .l2 {
   display: grid;
-  grid-template-columns: 42px 76px 1fr;
+  grid-template-columns: 42px 76px 1fr auto;
   gap: 3px;
   margin-top: 3px;
 }
@@ -1698,4 +1698,30 @@ label.toggle {
     width: 18px;
     height: 18px;
   }
+}
+.port-row .supply-check {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #5d6d5b;
+  white-space: nowrap;
+}
+.port-row .supply-check input {
+  width: auto;
+  margin: 0;
+}
+/* A switch's uplink, in its own port: a caret in the link light. */
+.node.faceplate .slot .link-light .uplink {
+  fill: none;
+  stroke: #6d7d6c;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+.node.faceplate .slot .link-light.gbe .uplink,
+.node.faceplate .slot .link-light.fe .uplink,
+.node.faceplate .slot .link-light.down .uplink {
+  stroke: #fff;
 }

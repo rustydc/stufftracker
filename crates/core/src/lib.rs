@@ -422,6 +422,9 @@ pub struct PortBox {
     /// the later ones are drawn tied to the first. Wires attach to box 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub segment: u32,
+    /// The supply (uplink, back-fed breaker) drawn in its own position.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub supply: bool,
 }
 fn is_zero(n: &u32) -> bool {
     *n == 0
@@ -612,12 +615,6 @@ fn validate_ports(e: &Entity) -> Result<(), String> {
         if p.amps.is_some_and(|a| a == 0 || a > 4000) {
             return Err(format!("{}: port {} amps must be 1-4000", e.name, p.id));
         }
-        if p.main && p.position.is_some() {
-            return Err(format!(
-                "{}: main port {} takes no position (a back-fed main in spaces is an ordinary breaker)",
-                e.name, p.id
-            ));
-        }
         let Some(start) = p.position else { continue };
         if start == 0 || start > 999 {
             return Err(format!("{}: port {} position must be 1-999", e.name, p.id));
@@ -760,6 +757,7 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
         height: rows * FACE_ROW - 4.,
         side,
         segment: 0,
+        supply: false,
     };
     let mut ports = Vec::new();
     let mut empty = Vec::new();
@@ -773,8 +771,14 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
     } else {
         240.
     };
-    // Supplies first: a row each above the numbered positions.
-    let mains: Vec<&Port> = e.ports.iter().filter(|p| p.main).collect();
+    // Supplies without a position (main lugs, a main breaker) get a row
+    // each above the numbered positions; one with a position (a switch's
+    // uplink port, a breaker back-fed from a generator) stays in its place.
+    let mains: Vec<&Port> = e
+        .ports
+        .iter()
+        .filter(|p| p.main && p.position.is_none())
+        .collect();
     for (i, p) in mains.iter().enumerate() {
         let mut b = row_box(10., i as f64, 1., width - 20., Side::Either);
         b.id = p.id.clone();
@@ -922,6 +926,12 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
         b.label = p.label.clone();
         rows += p.poles() as f64;
         ports.push(b);
+    }
+    for b in &mut ports {
+        b.supply = e
+            .ports
+            .iter()
+            .any(|p| p.id == b.id && p.main && p.position.is_some());
     }
     let unassigned = unassigned.then(|| {
         let mut b = row_box(10., rows, 1., width - 20., Side::Either);
@@ -4793,6 +4803,37 @@ mod tests {
         assert_eq!(size.height, FACE_HEADER + 4. * FACE_ROW + 8.);
     }
     #[test]
+    fn a_supply_with_a_position_stays_in_place() {
+        let doc = panel_doc();
+        let mut sw = doc
+            .entities
+            .iter()
+            .find(|e| e.id == "panel")
+            .unwrap()
+            .clone();
+        sw.faceplate = Some(Faceplate::Switch);
+        sw.ports = (1..=16).map(|n| port(&n.to_string(), n, 1, None)).collect();
+        sw.ports[8].main = true;
+        let mut d = doc.clone();
+        *d.entities.iter_mut().find(|e| e.id == "panel").unwrap() = sw.clone();
+        for c in &mut d.connections {
+            for ep in &mut c.endpoints {
+                ep.port = None;
+            }
+        }
+        validate(&d).unwrap();
+        let (_, face) = faceplate_layout(&sw, false);
+        let up = face.ports.iter().find(|b| b.id == "9").unwrap();
+        assert!(up.supply);
+        assert_eq!(up.position, "9");
+        assert_eq!(
+            up.y,
+            FACE_HEADER + 4. * FACE_ROW,
+            "row 5, no MAIN row above"
+        );
+        assert!(face.ports.iter().filter(|b| b.supply).count() == 1);
+    }
+    #[test]
     fn big_switch_faceplate_pairs_odd_and_even_ports() {
         let doc = panel_doc();
         let mut sw = doc
@@ -4913,7 +4954,7 @@ mod tests {
         let mut bad = doc.clone();
         let p = bad.entities.iter_mut().find(|e| e.id == "panel").unwrap();
         p.ports[0].position = Some(11);
-        assert!(validate(&bad).is_err(), "a main takes no position");
+        assert!(validate(&bad).is_ok(), "a back-fed main keeps its spaces");
     }
     #[test]
     fn details_are_typed_key_value_pairs() {

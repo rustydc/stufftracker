@@ -148,11 +148,11 @@ faceplate, so renaming a panel never drops its breakers. Change them with
   `["B", "A"]` at 7. Leave `half` empty when `halves` is set. A breaker whose
   spaces are not adjacent (the outer pair) is drawn as tied segments.
 - `main` marks the supply: a panel's main breaker or main lugs, a switch's
-  uplink, a controller's line input. It takes no `position` and is drawn in a
-  row above the numbered positions. Point an incoming feed's target endpoint
-  at it (a subpanel's main lugs, a transfer switch's utility and generator
-  inputs as two mains). A back-fed main breaker in branch spaces is an
-  ordinary breaker.
+  uplink, a controller's line input. Without a `position` it is drawn in a
+  row above the numbered positions; with one (a switch's uplink port, a
+  breaker back-fed in branch spaces) it stays in its place, marked as the
+  supply. Point an incoming feed's target endpoint at it (a subpanel's main
+  lugs, a transfer switch's utility and generator inputs as two mains).
 - `amps` is the rating printed on the handle (`0` if unknown) and
   `protection` is `gfci`, `afci`, `dual` (arc- and ground-fault) or `none`.
   Keep both out of `label`: the faceplate prints the amps sideways on each

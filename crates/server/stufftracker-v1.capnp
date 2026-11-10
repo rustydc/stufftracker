@@ -108,7 +108,7 @@ struct Port {
   half @4 :Text;
   # One entry per pole, the half of each space it covers: "A", "B", or "" for the whole space. A quad's outer pair at 1 is ["A","B"] (1A/3B), its inner pair ["B","A"] (1B/3A); a 7B to 9A linked pair is ["B","A"] at 7. Empty unless needed; leave half empty when set.
   halves @5 :List(Text);
-  # The supply: a panel's main breaker or main lugs, a switch's uplink, a controller's line input. Drawn in a row above the numbered positions, where an incoming feed's endpoint should land. Takes no position; a back-fed main in branch spaces is an ordinary breaker. A panel may have several (utility and generator inputs).
+  # The supply: a panel's main breaker or main lugs, a switch's uplink, a controller's line input. Without a position it is drawn in a row above the numbered positions; with one (a switch's uplink port, a back-fed breaker in branch spaces) it stays in place, marked as the supply. An incoming feed's endpoint should land on it. A panel may have several (utility and generator inputs).
   main @6 :Bool;
   # Breaker or circuit rating in amps, as printed on the handle; 0 if unknown. Keep it out of label.
   amps @7 :UInt16;

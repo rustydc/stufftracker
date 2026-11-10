@@ -199,6 +199,8 @@ try {
     id: String(k + 1),
     position: k + 1,
   }));
+  // Port 9 is the uplink: the supply, kept in its own place.
+  router.ports[8].main = true;
   await page.request.put(`${base}api/document`, {
     data: { revision: cur.revision, document: cur.document },
   });
@@ -286,6 +288,17 @@ try {
     text: "5",
     bolt: false,
   });
+  // The uplink stays port 9 (a caret in its light), with no MAIN row.
+  assert.equal(
+    await page
+      .locator('.node[data-id="router"] [data-port="9"] .link-light .uplink')
+      .count(),
+    1,
+  );
+  assert.doesNotMatch(
+    await page.locator('.node[data-id="router"]').textContent(),
+    /MAIN/,
+  );
   // Sixteen ports: odd down the left, even down the right.
   const at = (port) =>
     page

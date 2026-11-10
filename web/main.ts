@@ -76,6 +76,7 @@ type PortBox = {
   side: "left" | "right" | "either";
   /** A linked breaker's later, tied segment (its first is 0 / absent). */
   segment?: number;
+  supply?: boolean;
 };
 type DocumentData = {
   entities: Entity[];
@@ -1109,9 +1110,11 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
     const h = b.height - 4,
       x = mirror ? b.x + b.width - 29 : b.x + 3,
       y = b.y + 2;
-    const bolt = l.poe
-      ? `<path class="bolt" transform="translate(${mirror ? x + 3 : x + 17},${y + 2})" d="M4.2 0 L0 5.4 H2.8 L1.8 9.5 L6.2 3.6 H3.4 Z"/>`
-      : "";
+    const bolt = b.supply
+      ? `<path class="uplink" transform="translate(${mirror ? x + 3 : x + 17},${y + 3})" d="M0 5.5 L3.2 1.5 L6.4 5.5"/>`
+      : l.poe
+        ? `<path class="bolt" transform="translate(${mirror ? x + 3 : x + 17},${y + 2})" d="M4.2 0 L0 5.4 H2.8 L1.8 9.5 L6.2 3.6 H3.4 Z"/>`
+        : "";
     return `<g class="link-light ${l.link} ${l.poe}"><rect x="${x}" y="${y}" width="26" height="${h}" rx="3"/><text x="${mirror ? x + 22 : x + 4}" y="${y + h - 4}"${mirror ? ' text-anchor="end"' : ""}>${esc(b.position || "·")}</text>${bolt}</g>`;
   };
   // A port's live state (PoE draw, off, traffic) at its outer edge.
@@ -1132,7 +1135,10 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
   const slot = (b: PortBox, cls: string, title: string) => {
     const p = b.id ? portOf(b.id) : undefined;
     const tag = liveTag(b, p);
-    const text = [b.label, ...(b.id ? fed(b.id) : [])].filter(Boolean)[0] || "";
+    const named =
+      [b.label, ...(b.id ? fed(b.id) : [])].filter(Boolean)[0] || "";
+    // A supply in its own place is marked (on a switch, in its light).
+    const text = b.supply && f.kind !== "switch" ? `▲ ${named}` : named;
     const right = panel && b.side === "right";
     // Past the handle (and badge) on the right column; past the number on
     // the left.
@@ -1525,15 +1531,17 @@ const PROTECTION_NAME = {
   afci: "AFCI",
   dual: "AFCI/GFCI",
 } as const;
+// Supplies with no position (they're drawn on top) first, then by position.
+const topMain = (p: Port) => !!p.main && !p.position;
 const portOrder = (a: Port, b: Port) =>
-  Number(!!b.main) - Number(!!a.main) ||
+  Number(topMain(b)) - Number(topMain(a)) ||
   (a.position ?? 1e9) - (b.position ?? 1e9) ||
   (a.halves?.[0] || a.half || "").localeCompare(
     b.halves?.[0] || b.half || "",
   ) ||
   a.id.localeCompare(b.id, undefined, { numeric: true });
 function spaces(e: Entity, p: Port) {
-  if (p.main) return "Main";
+  if (topMain(p)) return "Main";
   if (!p.position) return "";
   const step = e.faceplate === "panel" ? 2 : 1;
   const list = Array.from(
@@ -1639,7 +1647,7 @@ function portEditorHtml(e: Entity) {
   return `<details class="port-editor" ${portEditorOpen ? "open" : ""}><summary>Physical layout &amp; ports</summary><form id="ports-form"><label class="field">Layout<select name="faceplate"><option value="">None</option>${(["panel", "switch", "terminals"] as const).map((k) => `<option value="${k}" ${faceplate === k ? "selected" : ""}>${{ panel: "Breaker panel", switch: "Network switch", terminals: "Terminal strip" }[k]}</option>`).join("")}</select></label><div class="port-rows"><div class="port-head"><span>ID</span><span title="Starting space or port number, or main">Pos</span><span title="Spaces covered (2 for a 240 V breaker)">Poles</span><span title="Tandem half: A or B, or one per space (B/A)">½</span><span></span></div>${ports
     .map(
       (p, i) =>
-        `<div class="port-row" data-row="${i}" ${p.orig ? `data-orig="${esc(p.orig)}"` : ""}><div class="l1"><input name="id" value="${esc(p.id)}" required maxlength="40" aria-label="Port ID"><input name="position" inputmode="numeric" pattern="[0-9]{1,3}|[Mm][Aa][Ii][Nn]" placeholder="#" title="Starting space or port number, or main for the supply" aria-label="Position" value="${p.main ? "main" : (p.position ?? "")}"><select name="poles" aria-label="Poles">${[1, 2, 3].map((n) => `<option ${(p.poles || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select><input name="half" pattern="[ABab]|([ABab-]/)+[ABab-]" title="A or B for a tandem half; one per space for a linked breaker, e.g. B/A (- for a whole space)" aria-label="Half" value="${esc(p.halves?.length ? p.halves.map((h) => h || "-").join("/") : p.half || "")}"><button type="button" class="remove-port" aria-label="Remove port ${esc(p.id)}">✕</button></div><div class="l2"><input name="amps" inputmode="numeric" pattern="[0-9]{1,4}" placeholder="A" title="Rating in amps" aria-label="Amps" value="${p.amps ?? ""}"><select name="protection" aria-label="Protection" title="Built-in protection"><option value="">—</option>${(["gfci", "afci", "dual"] as const).map((k) => `<option value="${k}" ${p.protection === k ? "selected" : ""}>${PROTECTION_NAME[k]}</option>`).join("")}</select><input name="label" value="${esc(p.label || "")}" maxlength="200" placeholder="Label" aria-label="Label"></div></div>`,
+        `<div class="port-row" data-row="${i}" ${p.orig ? `data-orig="${esc(p.orig)}"` : ""}><div class="l1"><input name="id" value="${esc(p.id)}" required maxlength="40" aria-label="Port ID"><input name="position" inputmode="numeric" pattern="[0-9]{1,3}|[Mm][Aa][Ii][Nn]" placeholder="#" title="Starting space or port number, or main for the supply" aria-label="Position" value="${topMain(p) ? "main" : (p.position ?? "")}"><select name="poles" aria-label="Poles">${[1, 2, 3].map((n) => `<option ${(p.poles || 1) === n ? "selected" : ""}>${n}</option>`).join("")}</select><input name="half" pattern="[ABab]|([ABab-]/)+[ABab-]" title="A or B for a tandem half; one per space for a linked breaker, e.g. B/A (- for a whole space)" aria-label="Half" value="${esc(p.halves?.length ? p.halves.map((h) => h || "-").join("/") : p.half || "")}"><button type="button" class="remove-port" aria-label="Remove port ${esc(p.id)}">✕</button></div><div class="l2"><input name="amps" inputmode="numeric" pattern="[0-9]{1,4}" placeholder="A" title="Rating in amps" aria-label="Amps" value="${p.amps ?? ""}"><select name="protection" aria-label="Protection" title="Built-in protection"><option value="">—</option>${(["gfci", "afci", "dual"] as const).map((k) => `<option value="${k}" ${p.protection === k ? "selected" : ""}>${PROTECTION_NAME[k]}</option>`).join("")}</select><input name="label" value="${esc(p.label || "")}" maxlength="200" placeholder="Label" aria-label="Label"><label class="supply-check" title="The supply: an uplink, or a breaker that feeds the panel"><input type="checkbox" name="supply" ${p.main ? "checked" : ""}> Supply</label></div></div>`,
     )
     .join(
       "",
@@ -1718,11 +1726,10 @@ function portHtml(e: Entity, p: Port, editable: boolean) {
     c.endpoints.some((ep) => ep.entity === e.id && ep.port === p.id),
   );
   const facts = [
-    p.main
-      ? "Supply"
-      : spaces(e, p)
-        ? `${e.faceplate === "panel" ? "Space" : "Position"} ${spaces(e, p)}`
-        : "",
+    p.main ? "Supply" : "",
+    !topMain(p) && spaces(e, p)
+      ? `${e.faceplate === "panel" ? "Space" : "Position"} ${spaces(e, p)}`
+      : "",
     ratingText(p),
   ].filter(Boolean);
   return `<span class="eyebrow">PORT · <button class="link-button" data-select-entity="${esc(e.id)}">${esc(e.name.toUpperCase())}</button></span><h2>${esc(p.id)}${p.label ? ` <small>${esc(p.label)}</small>` : ""}</h2>${facts.length ? `<p class="muted">${esc(facts.join(" · "))}</p>` : ""}<div class="conn-list"><h3>Connections</h3>${
@@ -1928,8 +1935,13 @@ function renderInspector() {
             orig: tr.dataset.orig,
           };
           if (v("label")) p.label = v("label");
+          const supply =
+            tr.querySelector<HTMLInputElement>("[name=supply]")!.checked;
           if (/^main$/i.test(v("position"))) p.main = true;
-          else if (v("position")) p.position = Number(v("position"));
+          else {
+            if (v("position")) p.position = Number(v("position"));
+            if (supply) p.main = true;
+          }
           if (Number(v("poles")) > 1) p.poles = Number(v("poles"));
           if (Number(v("amps")) > 0) p.amps = Number(v("amps"));
           if (v("protection"))
