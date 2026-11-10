@@ -1417,3 +1417,46 @@ label.toggle {
 .doc-links a {
   color: #2f6b4d;
 }
+/* A port's live state on a faceplate: PoE draw, off, traffic. */
+.port-tag rect {
+  fill: #eef1ec;
+  stroke: #d6ddd3;
+  stroke-width: 0.8;
+}
+.port-tag text {
+  font-size: 7.5px;
+  font-weight: 650;
+  fill: #4b5d50;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+.port-tag.on rect {
+  fill: #fbe7a6;
+  stroke: #e3c25e;
+}
+.port-tag.on text {
+  fill: #6b5207;
+}
+.port-tag.value rect {
+  fill: #e3efe6;
+  stroke: #b9d3c0;
+}
+.port-tag.value text {
+  fill: #2f5c45;
+}
+.port-tag.off text,
+.port-tag.muted text {
+  fill: #98a296;
+}
+.ha-device > small {
+  display: block;
+  margin: 2px 0 4px;
+  font-size: 10.5px;
+}
+.ha-device details summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: #6d7d6c;
+  padding: 4px 0;
+}

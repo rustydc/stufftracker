@@ -18,6 +18,16 @@ use tokio::sync::{mpsc, oneshot};
 
 /// Home Assistant areas: id (and lowercase name) → (display name, entity ids).
 type AreaMap = BTreeMap<String, (String, Vec<String>)>;
+/// One row of Home Assistant's entity registry, as far as status cares.
+#[derive(Clone, Debug)]
+struct RegEntry {
+    id: String,
+    name: String,
+    category: String,
+    disabled: bool,
+}
+/// Home Assistant devices: device id → its entities.
+type DeviceMap = BTreeMap<String, Vec<RegEntry>>;
 /// Slot names, as declared at registration.
 pub const HA_SLOT: &str = "home_assistant";
 pub const OUTLINE_SLOT: &str = "outline";
@@ -57,6 +67,7 @@ pub struct Live {
     ha: RefCell<Option<ha::Client>>,
     outline: RefCell<Option<outline::Client>>,
     areas: RefCell<Option<(Instant, AreaMap)>>,
+    devices: RefCell<Option<(Instant, DeviceMap)>>,
     status: RefCell<Option<(Instant, Value)>>,
     docs: RefCell<BTreeMap<String, (Instant, Value)>>,
 }
@@ -73,6 +84,7 @@ impl Live {
             // A new binding: forget anything learned without it.
             *self.status.borrow_mut() = None;
             *self.areas.borrow_mut() = None;
+            *self.devices.borrow_mut() = None;
             self.docs.borrow_mut().clear();
         }
     }
@@ -154,6 +166,46 @@ impl Live {
         Ok(map)
     }
 
+    /// The entity registry grouped by device, cached like areas. Disabled
+    /// rows are kept so the viewer can say what could be turned on.
+    async fn device_map(&self, client: &ha::Client) -> Result<DeviceMap, String> {
+        if let Some((at, map)) = self.devices.borrow().as_ref()
+            && at.elapsed() < AREA_TTL
+        {
+            return Ok(map.clone());
+        }
+        let mut req = client.list_entities_request();
+        req.get().init_req().set_include_disabled(true);
+        let resp = req.send().promise.await.map_err(|e| e.to_string())?;
+        let mut map: DeviceMap = BTreeMap::new();
+        for r in resp
+            .get()
+            .map_err(|e| e.to_string())?
+            .get_entries()
+            .map_err(|e| e.to_string())?
+            .iter()
+        {
+            let text = |t: capnp::Result<capnp::text::Reader<'_>>| {
+                t.ok()
+                    .and_then(|t| t.to_str().ok())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let device = text(r.get_device_id());
+            if device.is_empty() {
+                continue;
+            }
+            map.entry(device).or_default().push(RegEntry {
+                id: text(r.get_entity_id()),
+                name: text(r.get_name()),
+                category: text(r.get_category()),
+                disabled: r.get_disabled() || r.get_hidden(),
+            });
+        }
+        *self.devices.borrow_mut() = Some((Instant::now(), map.clone()));
+        Ok(map)
+    }
+
     /// Current states for every linked entity and every entity in a linked
     /// area, cached briefly so many viewers cost one bridge call.
     async fn status(&self, app: &App) -> Value {
@@ -176,6 +228,7 @@ impl Live {
         let doc = load_snapshot(app).map_err(|e| e.1)?.document;
         let mut entity_ids = BTreeSet::new();
         let mut area_ids = BTreeSet::new();
+        let mut device_ids = BTreeSet::new();
         for l in doc
             .entities
             .iter()
@@ -185,6 +238,9 @@ impl Live {
             match l.kind.as_str() {
                 "area" => {
                     area_ids.insert(l.external_id.clone());
+                }
+                _ if is_device_id(&l.kind, &l.external_id) => {
+                    device_ids.insert(l.external_id.clone());
                 }
                 _ => {
                     entity_ids.insert(l.external_id.clone());
@@ -199,6 +255,16 @@ impl Live {
                     entity_ids.extend(members.iter().cloned());
                     areas.insert(id.clone(), json!({ "name": name, "entities": members }));
                 }
+            }
+        }
+        let mut devices = serde_json::Map::new();
+        if !device_ids.is_empty() {
+            let map = self.device_map(client).await?;
+            for id in &device_ids {
+                let Some(rows) = map.get(id) else { continue };
+                let enabled: Vec<&RegEntry> = rows.iter().filter(|r| !r.disabled).collect();
+                entity_ids.extend(enabled.iter().map(|r| r.id.clone()));
+                devices.insert(id.clone(), device_json(rows));
             }
         }
         let mut entities = serde_json::Map::new();
@@ -242,6 +308,7 @@ impl Live {
             "updated": crate::now() * 1000,
             "entities": entities,
             "areas": areas,
+            "devices": devices,
         }))
     }
 
@@ -313,6 +380,49 @@ impl Live {
     }
 }
 
+/// A device link: kind "device", or a bare registry id (32 hex digits).
+fn is_device_id(kind: &str, id: &str) -> bool {
+    kind == "device" || (id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The port number an entity belongs to, from "…_port_8_poe" or "Port 8 PoE".
+fn port_number(entry: &RegEntry) -> Option<u32> {
+    let find = |s: &str, marker: &str| {
+        let lower = s.to_lowercase();
+        let at = lower.find(marker)? + marker.len();
+        let digits: String = lower[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let rest = lower[at + digits.len()..].chars().next();
+        // "port_8_poe" or "port 8" at the end; never "port_80x".
+        if digits.is_empty() || rest.is_some_and(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        digits.parse().ok()
+    };
+    find(&entry.id, "_port_").or_else(|| find(&entry.name, "port "))
+}
+
+/// A device for the viewer: its entities (enabled, with category), those
+/// per port, and the disabled ones that could be turned on in HA.
+fn device_json(rows: &[RegEntry]) -> Value {
+    let mut entities = Vec::new();
+    let mut ports: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut disabled = Vec::new();
+    for r in rows {
+        if r.disabled {
+            disabled.push(json!(r.id));
+            continue;
+        }
+        entities.push(json!({ "id": r.id, "category": r.category }));
+        if let Some(n) = port_number(r) {
+            ports.entry(n.to_string()).or_default().push(r.id.clone());
+        }
+    }
+    json!({ "entities": entities, "ports": ports, "disabled": disabled })
+}
+
 /// The attributes worth showing: scalars, not pictures or long lists.
 fn small_attributes(attrs: &Value) -> Value {
     const SKIP: [&str; 6] = [
@@ -366,6 +476,29 @@ mod tests {
             ids.set(1, "sensor.kitchen_temp");
             Promise::ok(())
         }
+        fn list_entities(
+            &mut self,
+            _: ha::ListEntitiesParams,
+            mut r: ha::ListEntitiesResults,
+        ) -> Promise<(), capnp::Error> {
+            let rows = [
+                ("switch.sw_port_3_poe", "Port 3 PoE", "", false),
+                ("sensor.sw_port_3_poe_power", "Port 3 PoE Power", "", false),
+                ("sensor.sw_port_3_rx", "Port 3 RX", "diagnostic", true),
+                ("sensor.sw_cpu", "CPU", "diagnostic", false),
+                ("sensor.sw_port_30x", "Port 30x", "", false),
+            ];
+            let mut list = r.get().init_entries(rows.len() as u32);
+            for (i, (id, name, category, disabled)) in rows.iter().enumerate() {
+                let mut e = list.reborrow().get(i as u32);
+                e.set_entity_id(id);
+                e.set_name(name);
+                e.set_device_id("0123456789abcdef0123456789abcdef");
+                e.set_category(category);
+                e.set_disabled(*disabled);
+            }
+            Promise::ok(())
+        }
         fn get_states(
             &mut self,
             p: ha::GetStatesParams,
@@ -398,6 +531,13 @@ mod tests {
                     "off",
                     r#"{"device_class":"door","entity_picture":"/x"}"#,
                 ),
+                ("switch.sw_port_3_poe", "on", "{}"),
+                (
+                    "sensor.sw_port_3_poe_power",
+                    "4.2",
+                    r#"{"unit_of_measurement":"W","device_class":"power"}"#,
+                ),
+                ("sensor.sw_cpu", "12", "{}"),
             ];
             let found: Vec<_> = all
                 .iter()
@@ -450,7 +590,14 @@ mod tests {
                     link("outline", "document", "k1"),
                 ],
                 "sensor" => vec![link("home_assistant", "entity", "binary_sensor.back_door")],
-                "panel" => vec![link("outline", "document", "p1")],
+                "panel" => vec![
+                    link("outline", "document", "p1"),
+                    link(
+                        "home_assistant",
+                        "device",
+                        "0123456789abcdef0123456789abcdef",
+                    ),
+                ],
                 _ => Vec::new(),
             };
         }
@@ -485,6 +632,18 @@ mod tests {
                         .get("entity_picture")
                         .is_none()
                 );
+                // A device link brings its enabled entities, grouped by port.
+                let dev = &s["devices"]["0123456789abcdef0123456789abcdef"];
+                assert_eq!(
+                    dev["ports"],
+                    json!({ "3": ["switch.sw_port_3_poe", "sensor.sw_port_3_poe_power"] })
+                );
+                assert_eq!(dev["disabled"], json!(["sensor.sw_port_3_rx"]));
+                assert_eq!(
+                    dev["entities"][2],
+                    json!({ "id": "sensor.sw_cpu", "category": "diagnostic" })
+                );
+                assert_eq!(s["entities"]["sensor.sw_port_3_poe_power"]["state"], "4.2");
                 // A second ask within the TTL is served from cache.
                 live.status(&app).await;
                 assert_eq!(calls.get(), 1);

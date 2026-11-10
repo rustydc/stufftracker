@@ -32,6 +32,54 @@ const status = {
       changed: now,
       attributes: { unit_of_measurement: "°C", device_class: "temperature" },
     },
+    "device_tracker.core_switch": {
+      state: "home",
+      name: "Core switch",
+      changed: now - 3600000,
+      attributes: { source_type: "router", ip: "192.168.1.2" },
+    },
+    "sensor.core_switch_state": {
+      state: "connected",
+      name: "Core switch State",
+      changed: now,
+      attributes: {},
+    },
+    "sensor.core_switch_temperature": {
+      state: "48.2",
+      name: "Core switch Temperature",
+      changed: now,
+      attributes: { unit_of_measurement: "°C", device_class: "temperature" },
+    },
+    "button.core_switch_restart": {
+      state: "unknown",
+      name: "Restart",
+      changed: now,
+      attributes: { device_class: "restart" },
+    },
+    "switch.core_switch_port_2_poe": {
+      state: "on",
+      name: "Port 2 PoE",
+      changed: now,
+      attributes: {},
+    },
+    "sensor.core_switch_port_2_poe_power": {
+      state: "4.21",
+      name: "Port 2 PoE Power",
+      changed: now,
+      attributes: { unit_of_measurement: "W", device_class: "power" },
+    },
+    "switch.core_switch_port_3_poe": {
+      state: "off",
+      name: "Port 3 PoE",
+      changed: now,
+      attributes: {},
+    },
+    "sensor.core_switch_port_3_poe_power": {
+      state: "0",
+      name: "Port 3 PoE Power",
+      changed: now,
+      attributes: { unit_of_measurement: "W", device_class: "power" },
+    },
     "switch.pump": {
       state: "unavailable",
       name: "Pump",
@@ -43,6 +91,34 @@ const status = {
     kitchen: {
       name: "Kitchen",
       entities: ["light.pendants", "sensor.kitchen_temp"],
+    },
+  },
+  devices: {
+    "0123456789abcdef0123456789abcdef": {
+      entities: [
+        { id: "device_tracker.core_switch", category: "" },
+        { id: "sensor.core_switch_state", category: "diagnostic" },
+        { id: "sensor.core_switch_temperature", category: "" },
+        { id: "button.core_switch_restart", category: "config" },
+        { id: "switch.core_switch_port_2_poe", category: "config" },
+        { id: "sensor.core_switch_port_2_poe_power", category: "diagnostic" },
+        { id: "switch.core_switch_port_3_poe", category: "config" },
+        { id: "sensor.core_switch_port_3_poe_power", category: "diagnostic" },
+      ],
+      ports: {
+        2: [
+          "switch.core_switch_port_2_poe",
+          "sensor.core_switch_port_2_poe_power",
+        ],
+        3: [
+          "switch.core_switch_port_3_poe",
+          "sensor.core_switch_port_3_poe_power",
+        ],
+      },
+      disabled: [
+        "sensor.core_switch_port_2_rx",
+        "sensor.core_switch_port_2_tx",
+      ],
     },
   },
 };
@@ -70,6 +146,14 @@ try {
   set("sensor", [link("home_assistant", "entity", "binary_sensor.back_door")]);
   set("water", [link("home_assistant", "entity", "switch.pump")]);
   set("panel", [link("outline", "document", "doc-1")]);
+  // A network switch: its HA device (ports and all) and its tracker.
+  set("router", [
+    link("home_assistant", "device", "0123456789abcdef0123456789abcdef"),
+    link("home_assistant", "entity", "device_tracker.core_switch"),
+  ]);
+  const router = cur.document.entities.find((e) => e.id === "router");
+  router.faceplate = "switch";
+  router.ports = [1, 2, 3, 4].map((n) => ({ id: String(n), position: n }));
   await page.request.put(`${base}api/document`, {
     data: { revision: cur.revision, document: cur.document },
   });
@@ -109,6 +193,44 @@ try {
     text: "21.4 °C · 1 light on",
     tone: "on",
   });
+
+  // Network gear: online (not "home") with a reading, and per-port state.
+  assert.deepEqual(await pill("router"), {
+    text: "online · 48.2 °C",
+    tone: "value",
+  });
+  // Show the switch's physical layout (ports) instead of its card.
+  await page.locator('.tree-row[data-select="router"]').click();
+  await page.locator("#inspector .faceplate-toggle").check();
+  await page.waitForSelector('.node.faceplate[data-id="router"]');
+  const tag = (port) =>
+    page
+      .locator(`.node[data-id="router"] [data-port="${port}"] .port-tag`)
+      .evaluate((g) => ({
+        text: g.textContent,
+        tone: [...g.classList].find((c) => c !== "port-tag"),
+      }));
+  assert.deepEqual(await tag("2"), { text: "4.2 W", tone: "on" });
+  assert.deepEqual(await tag("3"), { text: "PoE off", tone: "off" });
+  assert.equal(
+    await page
+      .locator('.node[data-id="router"] [data-port="1"] .port-tag')
+      .count(),
+    0,
+  );
+  await page.locator('.tree-row[data-select="router"]').click();
+  const dev = await page.locator("#inspector .ha-device").textContent();
+  assert.match(dev, /2 ports — select a port/);
+  assert.match(dev, /Core switch Temperature.*48\.2 °C/s);
+  assert.doesNotMatch(dev, /Port 2 PoE/, "port entities live on the port");
+  await page
+    .locator('.node[data-id="router"] [data-port="2"] rect')
+    .first()
+    .click();
+  await page.waitForSelector("#inspector .port-live h3");
+  const portLive = await page.locator("#inspector .port-live").textContent();
+  assert.match(portLive, /Port 2 PoE Power.*4\.2 W/s);
+  assert.match(portLive, /Turned off in Home Assistant: core_switch_port_2_rx/);
 
   // The inspector: Home Assistant rows and Outline documents.
   await page.locator('.tree-row[data-select="lamp"]').click();
@@ -152,7 +274,7 @@ try {
   await bare.close();
   assert.deepEqual(errors, []);
   console.log(
-    "Live checks passed: drawing before status, light/door/unavailable/area pills, inspector states and attributes, Outline titles and links, unwired.",
+    "Live checks passed: drawing before status, light/door/unavailable/area pills, inspector states and attributes, online network gear, device entities, port PoE tags and inspector, Outline titles and links, unwired.",
   );
 } finally {
   if (original) {

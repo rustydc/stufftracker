@@ -60,6 +60,14 @@ automation. Subsequent boots preserve your data.
   card ("on 78%", "21.4 °C", "open", "unavailable"; a linked room summarises
   its temperature, lights on and anything open) and a Home Assistant section
   in the inspector with each entity's state, attributes and last change.
+  A `device` link (a Home Assistant device id) brings in all of that
+  device's entities. The card picks the most useful state: a problem first,
+  then whether it is reachable (a router-seen tracker reads online/offline,
+  not "home"), then a reading such as temperature or power. Entities named
+  for a port number ("Port 8 PoE", `…_port_8_poe_power`) belong to the
+  port at that position: a switch's faceplate tags each port with its PoE
+  draw, "PoE off" or "off", plus traffic where HA has the per-port RX/TX
+  sensors turned on, and the port inspector lists them.
   Outline links show their document's title and open it. Status loads after
   the page draws and refreshes every 15 seconds; it never delays drawing or
   layout. Everyone who can open StuffTracker sees it.

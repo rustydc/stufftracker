@@ -202,6 +202,14 @@ type LiveStatus = {
   updated?: number;
   entities?: Record<string, EntityStatus>;
   areas?: Record<string, { name: string; entities: string[] }>;
+  devices?: Record<string, DeviceStatus>;
+};
+// A Home Assistant device: its entities, those per port number, and the
+// disabled ones (per-port traffic, say) that could be turned on in HA.
+type DeviceStatus = {
+  entities: { id: string; category: string }[];
+  ports: Record<string, string[]>;
+  disabled: string[];
 };
 type LiveDocuments = {
   connected: boolean;
@@ -250,6 +258,8 @@ function formatState(
       if (dc === "battery") return onOff("low", "ok", true);
       return onOff("on", "off");
     case "sensor": {
+      if (s.state === "connected") return { text: "online", tone: "value" };
+      if (s.state === "disconnected") return { text: "offline", tone: "alert" };
       const n = Number(s.state);
       const unit = a.unit_of_measurement ? ` ${a.unit_of_measurement}` : "";
       const v =
@@ -270,6 +280,16 @@ function formatState(
             : "value",
       };
     }
+    case "device_tracker":
+      // A router-seen tracker (network gear, anything wired) is about being
+      // reachable, not about being "home".
+      if (a.source_type === "router" || a.tracking_type === "connection")
+        return s.state === "home"
+          ? { text: "online", tone: "value" }
+          : { text: "offline", tone: "alert" };
+      return s.state === "home"
+        ? { text: "home", tone: "on" }
+        : { text: s.state === "not_home" ? "away" : s.state, tone: "off" };
     case "lock":
       return { text: s.state, tone: s.state === "unlocked" ? "alert" : "off" };
     case "cover":
@@ -316,19 +336,127 @@ function areaSummary(areaId: string): { text: string; tone: Tone } | null {
     tone: open ? "alert" : on ? "on" : "value",
   };
 }
-// What a thing's card shows: its first linked entity's state, or its area's summary.
+// A thing's Home Assistant devices, from its device links.
+function devicesOf(e: Entity): DeviceStatus[] {
+  return e.links
+    .filter((l) => isHa(l.provider) && liveStatus?.devices?.[l.external_id])
+    .map((l) => liveStatus!.devices![l.external_id]);
+}
+const isDeviceLink = (l: { kind: string; external_id: string }) =>
+  l.kind === "device" || /^[0-9a-f]{32}$/i.test(l.external_id);
+// Is this state about being reachable (online/offline)?
+const isPresence = (id: string, s: EntityStatus) =>
+  id.startsWith("device_tracker.") ||
+  (id.startsWith("binary_sensor.") &&
+    s.attributes.device_class === "connectivity") ||
+  (id.startsWith("sensor.") &&
+    (s.state === "connected" || s.state === "disconnected"));
+// Readings worth a glance on a card: power, temperature, clients…
+const READING_CLASSES = ["power", "temperature", "humidity", "battery"];
+const isReading = (id: string, s: EntityStatus) =>
+  id.startsWith("sensor.") &&
+  Number.isFinite(Number(s.state)) &&
+  s.state.trim() !== "" &&
+  (READING_CLASSES.includes(String(s.attributes.device_class)) ||
+    /_clients$/.test(id));
+// What a thing's card shows. Every linked entity (and each linked device's
+// own entities, ports aside) is a candidate: a problem wins, then whether
+// it's online, then its first plain state; one reading rides along.
 function cardStatus(e: Entity): { text: string; tone: Tone } | null {
   if (!liveStatus?.connected) return null;
-  for (const l of e.links.filter((l) => isHa(l.provider))) {
-    if (l.kind === "area") {
-      const a = areaSummary(l.external_id);
-      if (a) return a;
-    } else {
-      const st = liveStatus.entities?.[l.external_id];
-      if (st) return formatState(l.external_id, st);
-    }
+  const states = liveStatus.entities || {};
+  const ids: string[] = [];
+  const ha = e.links.filter((l) => isHa(l.provider));
+  for (const l of ha) {
+    if (l.kind === "area") continue;
+    if (isDeviceLink(l)) {
+      const d = liveStatus.devices?.[l.external_id];
+      const perPort = new Set(Object.values(d?.ports || {}).flat());
+      for (const x of d?.entities || [])
+        if (!perPort.has(x.id) && x.category !== "config") ids.push(x.id);
+    } else ids.push(l.external_id);
+  }
+  const known = [...new Set(ids)]
+    .filter((id) => states[id])
+    .map((id) => ({ id, s: states[id], f: formatState(id, states[id]) }));
+  const plain = known.filter(
+    (k) => k.f.tone !== "muted" && !isReading(k.id, k.s),
+  );
+  const primary =
+    plain.find((k) => k.f.tone === "alert" && !k.id.startsWith("update.")) ||
+    plain.find((k) => isPresence(k.id, k.s)) ||
+    plain.find(
+      (k) =>
+        !k.id.startsWith("button.") &&
+        !k.id.startsWith("update.") &&
+        !k.id.startsWith("number.") &&
+        !k.id.startsWith("select.") &&
+        !k.id.startsWith("image."),
+    );
+  const reading = known.find((k) => isReading(k.id, k.s));
+  if (primary || reading) {
+    // Offline readings are stale: say only that it's offline.
+    const parts = [
+      primary?.f.text,
+      primary?.f.tone === "alert" ? "" : reading?.f.text,
+    ];
+    return {
+      text: parts.filter(Boolean).join(" · "),
+      tone: (primary || reading)!.f.tone,
+    };
+  }
+  if (known.length) return known[0].f;
+  for (const l of ha.filter((l) => l.kind === "area")) {
+    const a = areaSummary(l.external_id);
+    if (a) return a;
   }
   return null;
+}
+// A port's live state, from its thing's devices' entities for that port
+// number: PoE and its draw, the port switched off, traffic when enabled.
+function portLive(
+  e: Entity,
+  p?: Port,
+): { ids: string[]; text: string; tone: Tone } | null {
+  if (!p?.position || !liveStatus?.entities) return null;
+  const ids = devicesOf(e).flatMap((d) => d.ports[String(p.position)] || []);
+  if (!ids.length) return null;
+  const states = liveStatus.entities;
+  const known = ids.filter((id) => states[id]);
+  const find = (re: RegExp) => known.find((id) => re.test(id));
+  const enable = find(/^switch\..*_port_\d+$/);
+  if (enable && states[enable].state === "off")
+    return { ids, text: "off", tone: "off" };
+  const parts: string[] = [];
+  let tone: Tone = "muted";
+  const poe = find(/^switch\..*_poe$/);
+  const watts = known.find(
+    (id) =>
+      id.startsWith("sensor.") &&
+      states[id].attributes.device_class === "power",
+  );
+  const w = watts ? Number(states[watts].state) : NaN;
+  if (Number.isFinite(w) && w > 0) {
+    parts.push(`${w < 10 ? w.toFixed(1) : Math.round(w)} W`);
+    tone = "on";
+  } else if (poe && states[poe].state === "off") {
+    parts.push("PoE off");
+    tone = "off";
+  }
+  const rate = (re: RegExp) => {
+    const id = find(re);
+    const n = id ? Number(states[id].state) : NaN;
+    return Number.isFinite(n) ? n : null;
+  };
+  const rx = rate(/_rx$/),
+    tx = rate(/_tx$/);
+  if (rx !== null || tx !== null) {
+    const mb = (n: number) => (n < 10 ? n.toFixed(1) : String(Math.round(n)));
+    parts.push(`↓${mb(rx || 0)} ↑${mb(tx || 0)}`);
+    if (tone === "muted") tone = (rx || 0) + (tx || 0) > 0 ? "on" : "value";
+  }
+  if (!parts.length) return { ids, text: "", tone };
+  return { ids, text: parts.join(" "), tone };
 }
 // A status pill, right-aligned at (right, top) in the node's coordinates.
 function pillSvg(e: Entity, right: number, top: number, max: number) {
@@ -348,6 +476,56 @@ const ago = (ms: number) => {
         ? `${Math.round(s / 3600)} h ago`
         : `${Math.round(s / 86400)} d ago`;
 };
+// One Home Assistant entity: name, id, when it changed, a few attributes.
+function haRow(id: string) {
+  const st = liveStatus?.entities?.[id];
+  if (!st)
+    return `<div class="ha-row"><div><b>${esc(id)}</b><small>${liveStatus?.connected ? "not reported" : ""}</small></div></div>`;
+  const f = formatState(id, st);
+  const attrs = Object.entries(st.attributes)
+    .filter(([k]) => !["unit_of_measurement", "device_class"].includes(k))
+    .slice(0, 6)
+    .map(([k, v]) => `${k.replaceAll("_", " ")}: ${v}`)
+    .join(" · ");
+  return `<div class="ha-row"><div><b>${esc(st.name || id)}</b><small>${esc(id)}${st.changed ? ` · changed ${ago(st.changed)}` : ""}</small>${attrs ? `<small class="ha-attrs">${esc(attrs)}</small>` : ""}</div><span class="ha-state ${f.tone}">${esc(f.text)}</span></div>`;
+}
+// A linked device: its main entities, then the housekeeping ones folded
+// away; per-port entities show on each port instead.
+function deviceHtml(id: string) {
+  const d = liveStatus?.devices?.[id];
+  if (!d)
+    return `<div class="ha-row"><div><b>Device</b><small>${esc(id)}${liveStatus?.connected ? " · not found" : ""}</small></div></div>`;
+  const perPort = new Set(Object.values(d.ports).flat());
+  const rest = d.entities.filter((x) => !perPort.has(x.id));
+  const main = rest.filter((x) => !x.category);
+  const more = rest.filter((x) => x.category);
+  const ports = Object.keys(d.ports).length;
+  const note = [
+    `${d.entities.length} entities`,
+    ports ? `${ports} ports — select a port for its state` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `<div class="ha-device"><small class="muted">Device · ${esc(note)}</small>${main.map((x) => haRow(x.id)).join("")}${more.length ? `<details><summary>${more.length} more (diagnostic, config)</summary>${more.map((x) => haRow(x.id)).join("")}</details>` : ""}</div>`;
+}
+// A port's Home Assistant entities, in the port inspector.
+function portLiveHtml(e: Entity, p: Port) {
+  if (!e.links?.some((l) => isHa(l.provider) && isDeviceLink(l)))
+    return '<div class="port-live"></div>';
+  const live = portLive(e, p);
+  const disabled = devicesOf(e)
+    .flatMap((d) => d.disabled)
+    .filter((id) => new RegExp(`_port_${p.position}_`).test(id));
+  const body = !liveStatus
+    ? '<p class="muted">Loading status…</p>'
+    : !live
+      ? '<p class="muted">No Home Assistant entities for this port.</p>'
+      : live.ids.map(haRow).join("");
+  const hint = disabled.length
+    ? `<p class="muted">Turned off in Home Assistant: ${disabled.map((id) => esc(id.split(".")[1])).join(", ")}</p>`
+    : "";
+  return `<div class="port-live ha-links"><h3>Home Assistant</h3>${body}${hint}</div>`;
+}
 // The inspector's live links: Home Assistant states and Outline documents.
 function liveLinksHtml(e: Entity) {
   const links = e.links || [];
@@ -367,20 +545,8 @@ function liveLinksHtml(e: Entity) {
           `<div class="ha-row"><div><b>${esc(area?.name || l.external_id)}</b><small>area</small></div>${sum ? `<span class="ha-state ${sum.tone}">${esc(sum.text)}</span>` : ""}</div>`,
         ];
       }
-      const st = liveStatus?.entities?.[l.external_id];
-      if (!st)
-        return [
-          `<div class="ha-row"><div><b>${esc(l.external_id)}</b><small>${liveStatus?.connected ? "not reported" : ""}</small></div></div>`,
-        ];
-      const f = formatState(l.external_id, st);
-      const attrs = Object.entries(st.attributes)
-        .filter(([k]) => !["unit_of_measurement", "device_class"].includes(k))
-        .slice(0, 6)
-        .map(([k, v]) => `${k.replaceAll("_", " ")}: ${v}`)
-        .join(" · ");
-      return [
-        `<div class="ha-row"><div><b>${esc(st.name || l.external_id)}</b><small>${esc(l.external_id)}${st.changed ? ` · changed ${ago(st.changed)}` : ""}</small>${attrs ? `<small class="ha-attrs">${esc(attrs)}</small>` : ""}</div><span class="ha-state ${f.tone}">${esc(f.text)}</span></div>`,
-      ];
+      if (isDeviceLink(l)) return [deviceHtml(l.external_id)];
+      return [haRow(l.external_id)];
     });
     const note = !liveStatus
       ? '<p class="muted">Loading status…</p>'
@@ -418,6 +584,16 @@ function paintLive() {
       (x) => x.id === (root.id === "sheet" ? sheetId : selected),
     );
     if (box && e) box.outerHTML = liveLinksHtml(e);
+    const portBox = root.querySelector(".port-live");
+    const sel =
+      root.id === "sheet"
+        ? sheetTarget?.kind === "port"
+          ? { entity: sheetTarget.id, port: sheetTarget.port }
+          : null
+        : selectedPort;
+    const pe = sel && doc.entities.find((x) => x.id === sel.entity);
+    const pp = pe && pe.ports?.find((x) => x.id === sel!.port);
+    if (portBox && pe && pp) portBox.outerHTML = portLiveHtml(pe, pp);
   }
 }
 let liveTimer = 0;
@@ -817,8 +993,20 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
       )
       .join("");
   };
+  // A port's live state (PoE draw, off, traffic) at its outer edge.
+  const liveTag = (b: PortBox, p?: Port) => {
+    const l = panel || b.segment ? null : portLive(e, p);
+    if (!l?.text || b.height < 12) return { svg: "", width: 0 };
+    const w = l.text.length * 4.6 + 8;
+    const x = b.x + b.width - w - (p?.protection ? 22 : 3);
+    return {
+      svg: `<g class="port-tag ${l.tone}"><rect x="${x}" y="${b.y + 2}" width="${w}" height="${Math.min(12, b.height - 4)}" rx="3"/><text x="${x + w / 2}" y="${b.y + 2 + Math.min(12, b.height - 4) / 2}">${esc(l.text)}</text></g>`,
+      width: w + 3,
+    };
+  };
   const slot = (b: PortBox, cls: string, title: string) => {
     const p = b.id ? portOf(b.id) : undefined;
+    const tag = liveTag(b, p);
     const text = [b.label, ...(b.id ? fed(b.id) : [])].filter(Boolean)[0] || "";
     const right = panel && b.side === "right";
     // Past the handle (and badge) on the right column; past the number on
@@ -829,10 +1017,10 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
     const posX = right ? b.x + b.width - 5 : b.x + 5;
     const max = Math.max(
       4,
-      Math.floor((b.width - 44 - handleW - badgeW) / 6.2),
+      Math.floor((b.width - 44 - handleW - badgeW - tag.width) / 6.2),
     );
     const small = b.height < 14;
-    return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/>${positions(b, posX, right)}<text class="slot-label ${small ? "tiny mid" : ""}" x="${labelX}" y="${b.y + (small ? b.height / 2 : 13)}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text>${handle(b, p)}${badge(b, p)}<title>${esc(title)}</title></g>`;
+    return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/>${positions(b, posX, right)}<text class="slot-label ${small ? "tiny mid" : ""}" x="${labelX}" y="${b.y + (small ? b.height / 2 : 13)}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text>${handle(b, p)}${badge(b, p)}${tag.svg}<title>${esc(title)}${tag.svg ? `\nHome Assistant: ${esc(portLive(e, p)!.text)}` : ""}</title></g>`;
   };
   const rating = (p?: Port) =>
     [
@@ -1149,7 +1337,7 @@ function portHtml(e: Entity, p: Port, editable: boolean) {
           })
           .join("")
       : '<p class="muted">Nothing connected</p>'
-  }</div>${detailsHtml(p)}${editable ? detailsEditorHtml(portTarget(e, p)) : ""}`;
+  }</div>${portLiveHtml(e, p)}${detailsHtml(p)}${editable ? detailsEditorHtml(portTarget(e, p)) : ""}`;
 }
 function renderConnectionInspector(): boolean {
   const c = doc.connections.find((c) => c.id === selectedConnection);
