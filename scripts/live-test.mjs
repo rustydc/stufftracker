@@ -26,7 +26,7 @@ const status = {
       changed: now - 30000,
       attributes: { device_class: "door" },
     },
-    "sensor.kitchen_temp": {
+    "sensor.kitchen_thermometer_temperature": {
       state: "21.43",
       name: "Kitchen temperature",
       changed: now,
@@ -92,6 +92,24 @@ const status = {
       changed: now,
       attributes: { unit_of_measurement: "W", device_class: "power" },
     },
+    "sensor.p1s_bed_temperature": {
+      state: "32.0",
+      name: "P1S Bed temperature",
+      changed: now,
+      attributes: { unit_of_measurement: "°F", device_class: "temperature" },
+    },
+    "light.barnap_led": {
+      state: "on",
+      name: "BarnAP LED",
+      changed: now,
+      attributes: {},
+    },
+    "light.barn_lights": {
+      state: "off",
+      name: "Barn lights",
+      changed: now,
+      attributes: {},
+    },
     "switch.pump": {
       state: "unavailable",
       name: "Pump",
@@ -100,9 +118,17 @@ const status = {
     },
   },
   areas: {
+    barn: {
+      name: "Barn",
+      entities: [
+        "sensor.p1s_bed_temperature",
+        "light.barnap_led",
+        "light.barn_lights",
+      ],
+    },
     kitchen: {
       name: "Kitchen",
-      entities: ["light.pendants", "sensor.kitchen_temp"],
+      entities: ["light.pendants", "sensor.kitchen_thermometer_temperature"],
     },
   },
   devices: {
@@ -159,6 +185,8 @@ try {
   set("lamp", [link("home_assistant", "entity", "light.pendants")]);
   set("sensor", [link("home_assistant", "entity", "binary_sensor.back_door")]);
   set("water", [link("home_assistant", "entity", "switch.pump")]);
+  // An area with nothing worth saying: a printer bed, a device LED, lights off.
+  set("tv", [link("home_assistant", "area", "barn")]);
   set("panel", [link("outline", "document", "doc-1")]);
   // A network switch: its HA device (ports and all) and its tracker.
   set("router", [
@@ -206,6 +234,11 @@ try {
   assert.deepEqual(await pill("lamp"), { text: "on 78%", tone: "on" });
   assert.deepEqual(await pill("sensor"), { text: "open", tone: "alert" });
   assert.deepEqual(await pill("water"), { text: "unavailable", tone: "muted" });
+  assert.equal(
+    await page.locator('.node[data-id="tv"] .ha-pill').count(),
+    0,
+    "no pill without useful data",
+  );
   assert.deepEqual(await pill("kitchen"), {
     text: "21.4 °C · 1 light on",
     tone: "on",

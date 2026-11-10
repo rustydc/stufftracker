@@ -310,7 +310,14 @@ function formatState(
       };
   }
 }
-// A room linked to an area: its temperature, lights on, anything open.
+// A room linked to an area: only what's worth a glance. Its temperature
+// from a room thermometer or thermostat (not a printer bed, a target or a
+// switch's internal sensor), lights that are on (not device LEDs), and
+// anything open. Nothing worth saying means no pill.
+const ROOM_TEMP =
+  /thermostat|thermometer|air_temp|room_temp|_temperature_temperature$/;
+const NOT_ROOM_TEMP =
+  /target|internal|nozzle|bed_|chamber|cpu|battery|water|probe/;
 function areaSummary(areaId: string): { text: string; tone: Tone } | null {
   const area = liveStatus?.areas?.[areaId];
   const states = liveStatus?.entities;
@@ -323,13 +330,16 @@ function areaSummary(areaId: string): { text: string; tone: Tone } | null {
     ([id, s]) =>
       id.startsWith("sensor.") &&
       s.attributes.device_class === "temperature" &&
+      ROOM_TEMP.test(id) &&
+      !NOT_ROOM_TEMP.test(id) &&
       Number.isFinite(Number(s.state)),
   );
   if (temp) parts.push(formatState(temp[0], temp[1]).text);
-  const lights = members.filter(([id]) => id.startsWith("light."));
-  const on = lights.filter(([, s]) => s.state === "on").length;
-  if (lights.length)
-    parts.push(on ? `${on} light${on === 1 ? "" : "s"} on` : "lights off");
+  const on = members.filter(
+    ([id, s]) =>
+      id.startsWith("light.") && !/_led$/.test(id) && s.state === "on",
+  ).length;
+  if (on) parts.push(`${on} light${on === 1 ? "" : "s"} on`);
   const open = members.filter(([id, s]) => {
     if (!id.startsWith("binary_sensor.")) return false;
     return (
@@ -339,7 +349,7 @@ function areaSummary(areaId: string): { text: string; tone: Tone } | null {
     );
   }).length;
   if (open) parts.push(`${open} open`);
-  if (!parts.length) return { text: `${members.length} in HA`, tone: "muted" };
+  if (!parts.length) return null;
   return {
     text: parts.join(" · "),
     tone: open ? "alert" : on ? "on" : "value",
