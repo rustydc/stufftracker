@@ -25,7 +25,7 @@ try {
           body: readFileSync("work/sample-viewer.html", "utf8"),
         }),
       );
-    await page.goto(url);
+    await page.goto(url.includes("offline") ? url : url + "#everything");
     await page.waitForSelector(".node");
     const cdp = await context.newCDPSession(page);
     const frame = await page.locator("#graph").boundingBox();

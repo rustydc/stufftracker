@@ -70,7 +70,7 @@ try {
     data: { revision: cur.revision, document: doc },
   });
   assert.equal(put.status(), 200);
-  await page.goto(base);
+  await page.goto(base + "#everything");
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
   );

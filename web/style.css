@@ -1512,3 +1512,190 @@ label.toggle {
   fill: #f2b705;
   stroke: none;
 }
+/* The list: the home screen. Everything as a tree, a typed filter, checks. */
+.list-mode .sidebar,
+.list-mode #graph,
+.list-mode .zoom-controls,
+.list-mode .canvas-hint,
+.list-mode #focus-bar,
+.list-mode #pick-bar,
+.list-mode #filter-panel,
+.list-mode #filter,
+.list-mode #save-view,
+.list-mode #to-list {
+  display: none !important;
+}
+.list-mode .workspace {
+  grid-template-columns: minmax(300px, 1fr) 276px;
+}
+.list-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fcfdfb;
+}
+.list-view[hidden] {
+  display: none;
+}
+.list-head {
+  padding: 12px 14px 8px;
+  border-bottom: 1px solid #e3e9e1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.list-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #cfd9cc;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0 10px;
+}
+.list-search span {
+  color: #7d8c7b;
+}
+.list-search input {
+  flex: 1;
+  border: 0;
+  outline: 0;
+  padding: 9px 0;
+  font: inherit;
+  font-size: 14px;
+  background: transparent;
+  min-width: 0;
+}
+.list-search:focus-within {
+  border-color: #6f9a62;
+  box-shadow: 0 0 0 3px #e3eedd;
+}
+.list-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.list-actions button {
+  font-size: 12px;
+  padding: 5px 9px;
+}
+.list-actions button:disabled {
+  opacity: 0.5;
+}
+.list-count {
+  color: #5d6d5b;
+  margin-right: 4px;
+}
+.list-spacer {
+  flex: 1;
+}
+.list-rows {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0 24px;
+}
+.list-row {
+  display: grid;
+  grid-template-columns:
+    18px 18px 18px minmax(140px, 1.2fr) minmax(0, 1.5fr)
+    auto;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px 5px calc(8px + var(--depth) * 18px);
+  border-bottom: 1px solid #eef2ec;
+  cursor: pointer;
+  font-size: 13px;
+}
+.list-row:hover {
+  background: #f3f7f0;
+}
+.list-row.selected {
+  background: #e7f0e1;
+}
+.list-row.checked {
+  box-shadow: inset 3px 0 #6f9a62;
+}
+.list-row.context {
+  opacity: 0.55;
+}
+.list-row .twisty {
+  border: 0;
+  background: none;
+  padding: 0;
+  width: 18px;
+  color: #6d7d6c;
+  cursor: pointer;
+}
+.list-row .twisty:disabled {
+  cursor: default;
+}
+.list-row input[type="checkbox"] {
+  margin: 0;
+  width: 15px;
+  height: 15px;
+  accent-color: #5b8a4e;
+}
+.list-name {
+  min-width: 0;
+}
+.list-name b {
+  display: block;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.list-name small {
+  color: #82917f;
+  font-size: 11px;
+}
+.list-name em {
+  color: #4f7f43;
+  font-style: normal;
+  font-weight: 600;
+}
+.list-facts {
+  min-width: 0;
+  display: flex;
+  gap: 12px;
+  color: #4b5a49;
+  font-size: 12px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.list-facts span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.list-facts i {
+  font-style: normal;
+  color: #8b998a;
+}
+.list-empty {
+  padding: 20px;
+}
+@media (max-width: 1150px) {
+  .list-mode .workspace {
+    grid-template-columns: minmax(300px, 1fr) 230px;
+  }
+}
+@media (max-width: 800px) {
+  .list-mode .workspace {
+    grid-template-columns: 1fr;
+  }
+  .list-row {
+    grid-template-columns: 18px 20px 18px minmax(0, 1fr) auto;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+  .list-facts {
+    display: none;
+  }
+  .list-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+  }
+}

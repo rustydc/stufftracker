@@ -22,7 +22,7 @@ let original;
 try {
   original = (await (await page.request.get(`${base}api/document`)).json())
     .document;
-  await page.goto(base);
+  await page.goto(base + "#everything");
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
   );
@@ -189,7 +189,7 @@ try {
   await ro.route("**/api/session", (r) =>
     r.fulfill({ contentType: "application/json", body: '{"writable":false}' }),
   );
-  await ro.goto(base);
+  await ro.goto(base + "#everything");
   await ro.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("Read-only share"),
   );

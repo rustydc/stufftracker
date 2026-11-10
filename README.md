@@ -76,6 +76,22 @@ automation. Subsequent boots preserve your data.
   Outline links show their document's title and open it. Status loads after
   the page draws and refreshes every 15 seconds; it never delays drawing or
   layout. Everyone who can open StuffTracker sees it.
+- **The list (home screen).** StuffTracker opens on a list, not a diagram:
+  every space and thing as a tree you fold and unfold, with a live status
+  pill and the first details of each row. Nothing is laid out until you ask.
+  Type in the filter box to narrow it, all terms must hold: plain words
+  search everything; `key:value` searches a detail whose key starts with
+  `key` (`ip:192.168`, `model:us8`), `key=value` matches exactly, `has:key`
+  needs the detail, and `name:`, `kind:`, `in:` (inside a space),
+  `status:` (live state, e.g. `status:offline`) and `is:checked` do what they
+  say; `-` in front means "not", and quotes keep spaces together
+  (`"IP address":10.0`). Matches show inside their (dimmed) spaces. Each row
+  has a checkbox, and checks stay as you change the query, so you can
+  gather things with several queries; **Diagram N →** draws just the
+  checked things (inside their spaces), with the usual hops and direction
+  controls. **☰ List** comes back, checks intact. **Everything** draws the
+  whole inventory, and choosing a saved view opens it. A detail's key or ⧉
+  button filters the list. Open `#everything` to start on the full diagram.
 - **Filters.** **Filter** (beside the saved views) shows only the things whose
   details match: pick a detail key (or Name, Kind, Any field), a test
   (contains, is, has, doesn't have) and a value, and combine conditions with

@@ -145,6 +145,14 @@ let offline = false,
   current: Layout;
 // Things picked with shift-click or a shift-drag lasso, for "show only these".
 let picked = new Set<string>();
+// The list (the home screen) or a diagram. The list never lays anything out;
+// a diagram is drawn only when asked for: of the checked things, a saved
+// view, or everything.
+let mode: "list" | "diagram" = "list";
+// Checked in the list, kept as the query changes, for "Diagram these".
+const checked = new Set<string>();
+let listQuery = "";
+const listOpen = new Set<string>();
 let camera = { x: 0, y: 0, scale: 1 },
   first = true;
 const svg = $("graph") as unknown as SVGSVGElement;
@@ -179,6 +187,7 @@ function applyLayout(layout: Layout) {
     view.focus.positions = layout.focus_positions;
 }
 function setFocus(focus: Focus | null) {
+  mode = "diagram";
   if (focus) view.focus = focus;
   else delete view.focus;
   picked.clear();
@@ -631,7 +640,8 @@ function liveLinksHtml(e: Entity) {
 // Repaint only what status touches: pills (scene markup, no layout) and the
 // live sections of the inspector and the phone sheet.
 function paintLive() {
-  if (!dragBase) renderScene();
+  if (mode === "list") renderListRows();
+  else if (!dragBase) renderScene();
   for (const root of [$("inspector"), $("sheet")]) {
     const box = root.querySelector(".live-links");
     const e = doc.entities.find(
@@ -706,6 +716,14 @@ function describeFilter(f: Filter) {
 const matchingIds = (filter: Filter): string[] =>
   JSON.parse(matching(JSON.stringify({ document: doc, filter })));
 function showMatching(filter: Filter) {
+  // In the list, "show everything with this detail" is a query there.
+  if (mode === "list") {
+    sheetTarget = null;
+    sheetId = null;
+    renderSheet();
+    setListQuery(filterToQuery(filter));
+    return;
+  }
   setFocus({ entities: [], hops: 0, direction: "both", filter });
 }
 // The filter being edited in the panel, until shown.
@@ -841,6 +859,7 @@ function renderFilterPanel() {
   };
 }
 function renderBars() {
+  if (mode === "list" || !current) return;
   const f = view.focus;
   const bar = $("focus-bar");
   bar.hidden = !f;
@@ -904,6 +923,26 @@ function renderBars() {
   }
 }
 function render() {
+  const listing = mode === "list";
+  $("app").classList.toggle("list-mode", listing);
+  $("list").hidden = !listing;
+  document.querySelector(".canvas-toolbar .eyebrow")!.textContent = listing
+    ? "INVENTORY"
+    : "SPATIAL WORKSPACE";
+  document.querySelector(".canvas-toolbar h1")!.textContent = listing
+    ? "Your stuff"
+    : "House connections";
+  if (listing) {
+    renderList();
+    renderLayers();
+    renderInspector();
+    renderSheet();
+    $<HTMLButtonElement>("save-document").disabled = !writable || !dirty;
+    $("counts").textContent =
+      `${doc.entities.length} things · ${doc.connections.length} connections`;
+    $("counts").classList.remove("error");
+    return;
+  }
   layoutGeneration++;
   delete svg.dataset.layoutPending;
   computeLayout();
@@ -921,6 +960,7 @@ function render() {
   }
 }
 function renderScene() {
+  if (mode === "list" || !current) return;
   let content = "";
   for (const l of doc.layers) {
     content += `<defs><marker id="arrow-${esc(l.id)}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="${esc(l.color)}"/></marker></defs>`;
@@ -1195,6 +1235,273 @@ function renderTree() {
   walk(null, 0);
   $("tree").innerHTML = html;
 }
+// --- The list: every thing as an expandable tree, with a typed filter ------
+// A query is terms, all of which must hold: a word anywhere; key:value (a
+// detail whose key starts with key, e.g. ip:192.168); key=value (exactly);
+// has:key; name:, kind:, in:space, status:offline, is:checked; and -term
+// for "not". Quote anything with spaces: "IP address":10.0 or "back door".
+type Term = { neg: boolean; key: string | null; exact: boolean; value: string };
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+function parseQuery(q: string): Term[] {
+  const out: Term[] = [];
+  for (const raw of q.match(/(?:[^\s"]+|"[^"]*"?)+/g) || []) {
+    let t = raw;
+    const neg = t.length > 1 && t.startsWith("-");
+    if (neg) t = t.slice(1);
+    // The first separator outside quotes splits key from value.
+    let quoted = false,
+      at = -1;
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] === '"') quoted = !quoted;
+      else if (!quoted && (t[i] === ":" || t[i] === "=")) {
+        at = i;
+        break;
+      }
+    }
+    const unq = (x: string) => x.replaceAll('"', "").trim();
+    if (at > 0)
+      out.push({
+        neg,
+        key: unq(t.slice(0, at)),
+        exact: t[at] === "=",
+        value: unq(t.slice(at + 1)),
+      });
+    else if (unq(t)) out.push({ neg, key: null, exact: false, value: unq(t) });
+  }
+  return out;
+}
+const quoteTerm = (s: string) =>
+  /[\s:="]/.test(s) ? `"${s.replaceAll('"', "")}"` : s;
+// A filter (from a detail's "same value" or key button) as a typed query.
+function filterToQuery(f: Filter) {
+  return f.conditions
+    .map((c) => {
+      const key =
+        c.key === "@name"
+          ? "name"
+          : c.key === "@kind"
+            ? "kind"
+            : quoteTerm(c.key);
+      const v = quoteTerm(c.value || "");
+      if (c.op === "exists") return `has:${key}`;
+      if (c.op === "missing") return `-has:${key}`;
+      if (c.key === "@any") return v;
+      return `${key}${c.op === "equals" ? "=" : ":"}${v}`;
+    })
+    .join(" ");
+}
+const propertyText = (p: Property) =>
+  p.type === "text"
+    ? p.text
+    : p.type === "link"
+      ? `${p.url} ${p.title || ""}`
+      : p.name;
+// Everything a query can look at on a thing: its details, its ports and
+// their details, its connections and theirs, and its external links.
+function fieldsOf(e: Entity) {
+  const prop = (p: Property) => ({ key: p.key, text: propertyText(p) });
+  return [
+    ...(e.properties || []).map(prop),
+    ...(e.ports || []).flatMap((p) => [
+      { key: "port", text: `${p.id} ${p.label || ""}` },
+      ...(p.properties || []).map(prop),
+    ]),
+    ...doc.connections
+      .filter((c) => c.endpoints.some((ep) => ep.entity === e.id))
+      .flatMap((c) => [
+        { key: "connection", text: c.name },
+        ...(c.properties || []).map(prop),
+      ]),
+    ...(e.links || []).map((l) => ({
+      key: l.provider,
+      text: `${l.kind} ${l.external_id}`,
+    })),
+  ];
+}
+function ancestorsOf(e: Entity) {
+  const out: Entity[] = [];
+  let p = e.parent;
+  while (p) {
+    const a = doc.entities.find((x) => x.id === p);
+    if (!a || out.includes(a)) break;
+    out.push(a);
+    p = a.parent;
+  }
+  return out;
+}
+function termHolds(
+  e: Entity,
+  t: Term,
+  fields: { key: string; text: string }[],
+) {
+  const v = t.value.toLowerCase();
+  const has = (s: string) =>
+    t.exact ? s.trim().toLowerCase() === v : s.toLowerCase().includes(v);
+  const k = t.key ? norm(t.key) : "";
+  let ok: boolean;
+  if (!t.key)
+    ok =
+      has(e.name) ||
+      has(e.kind) ||
+      fields.some((f) => has(f.key) || has(f.text));
+  else if (k === "name") ok = has(e.name);
+  else if (k === "kind") ok = has(e.kind);
+  else if (k === "in") ok = ancestorsOf(e).some((a) => has(a.name));
+  else if (k === "is") ok = v === "checked" ? checked.has(e.id) : false;
+  else if (k === "status") {
+    const st = cardStatus(e);
+    ok = !!st && (!v || has(st.text) || st.tone === v);
+  } else if (k === "has")
+    ok = !v || fields.some((f) => norm(f.key).startsWith(norm(t.value)));
+  else {
+    const fs = fields.filter((f) => norm(f.key).startsWith(k));
+    ok = v ? fs.some((f) => has(f.text)) : fs.length > 0;
+  }
+  return t.neg ? !ok : ok;
+}
+function setListQuery(q: string) {
+  listQuery = q;
+  const input = document.querySelector<HTMLInputElement>("#list-query");
+  if (input && input.value !== q) input.value = q;
+  renderListRows();
+}
+// The list's frame (query box) is drawn once; rows redraw as things change.
+function renderList() {
+  const root = $("list");
+  if (!root.querySelector("#list-query")) {
+    root.innerHTML = `<div class="list-head"><label class="list-search"><span>⌕</span><input id="list-query" type="search" autocomplete="off" spellcheck="false" placeholder="Filter: words, ip:192.168, kind:switch, in:barn, has:manual, status:offline" aria-label="Filter the list"></label><div id="list-actions" class="list-actions"></div></div><div id="list-rows" class="list-rows" role="tree"></div>`;
+    const input = root.querySelector<HTMLInputElement>("#list-query")!;
+    input.value = listQuery;
+    input.oninput = () => {
+      listQuery = input.value;
+      renderListRows();
+    };
+    root.querySelector<HTMLElement>("#list-rows")!.onclick = onListClick;
+    root.querySelector<HTMLElement>("#list-actions")!.onclick = onListAction;
+    for (const e of doc.entities) if (!e.parent) listOpen.add(e.id);
+  }
+  renderListRows();
+}
+let listMatches: string[] = [];
+function renderListRows() {
+  const rowsBox = document.querySelector<HTMLElement>("#list-rows");
+  if (!rowsBox) return;
+  const terms = parseQuery(listQuery);
+  const active = terms.length > 0;
+  const kids = new Map<string | null, Entity[]>();
+  for (const e of doc.entities) {
+    const k = e.parent || null;
+    if (!kids.has(k)) kids.set(k, []);
+    kids.get(k)!.push(e);
+  }
+  const match = new Set<string>();
+  if (active)
+    for (const e of doc.entities) {
+      const fields = fieldsOf(e);
+      if (terms.every((t) => termHolds(e, t, fields))) match.add(e.id);
+    }
+  listMatches = [...match];
+  const shown = new Set(match);
+  for (const id of match)
+    for (const a of ancestorsOf(doc.entities.find((x) => x.id === id)!))
+      shown.add(a.id);
+  // Key terms say which details matter: show those first in each row.
+  const keyed = terms
+    .filter(
+      (t) =>
+        t.key &&
+        !["name", "kind", "in", "is", "status", "has"].includes(norm(t.key)),
+    )
+    .map((t) => norm(t.key!));
+  const checkedInside = (id: string): number =>
+    (kids.get(id) || []).reduce(
+      (n, c) => n + (checked.has(c.id) ? 1 : 0) + checkedInside(c.id),
+      0,
+    );
+  const countInside = (id: string): number =>
+    (kids.get(id) || []).reduce((n, c) => n + 1 + countInside(c.id), 0);
+  let html = "";
+  const walk = (parent: string | null, depth: number) => {
+    for (const e of kids.get(parent) || []) {
+      if (active && !shown.has(e.id)) continue;
+      const children = (kids.get(e.id) || []).length;
+      const open = active || listOpen.has(e.id);
+      const facts = (e.properties || [])
+        .filter((p) => p.type === "text" || p.type === "link")
+        .map((p) => ({
+          p,
+          rank: keyed.some((k) => norm(p.key).startsWith(k)) ? 0 : 1,
+        }))
+        .sort((a, b) => a.rank - b.rank)
+        .slice(0, 2)
+        .map(
+          ({ p }) =>
+            `<span><i>${esc(p.key)}</i> ${esc(propertyText(p))}</span>`,
+        )
+        .join("");
+      const st = cardStatus(e);
+      const inside = children && !open ? checkedInside(e.id) : 0;
+      html += `<div class="list-row ${active && !match.has(e.id) ? "context" : ""} ${selected === e.id ? "selected" : ""} ${checked.has(e.id) ? "checked" : ""}" data-row="${esc(e.id)}" role="treeitem" style="--depth:${depth}"${children ? ` aria-expanded="${open}"` : ""}><button class="twisty" data-twisty="${esc(e.id)}" ${children && !active ? "" : "disabled"} aria-label="${open ? "Collapse" : "Expand"} ${esc(e.name)}">${children ? (open ? "▾" : "▸") : ""}</button><input type="checkbox" data-check="${esc(e.id)}" ${checked.has(e.id) ? "checked" : ""} aria-label="Check ${esc(e.name)}"><span class="kind-icon">${icon(e.kind)}</span><span class="list-name"><b>${esc(e.name)}</b><small>${esc(e.kind)}${children ? ` · ${countInside(e.id)} inside` : ""}${inside ? ` · <em>${inside} checked inside</em>` : ""}</small></span><span class="list-facts">${facts}</span><span class="list-status">${st ? `<span class="ha-state ${st.tone}">${esc(st.text)}</span>` : ""}</span></div>`;
+      if (children && open) walk(e.id, depth + 1);
+    }
+  };
+  walk(null, 0);
+  rowsBox.innerHTML =
+    html ||
+    `<p class="muted list-empty">Nothing matches <b>${esc(listQuery)}</b>.</p>`;
+  renderListActions(active, match);
+}
+function renderListActions(active: boolean, match: Set<string>) {
+  const box = document.querySelector<HTMLElement>("#list-actions");
+  if (!box) return;
+  const unchecked = [...match].filter((id) => !checked.has(id)).length;
+  const checkedHere = [...match].filter((id) => checked.has(id)).length;
+  const n = checked.size;
+  box.innerHTML = `<span class="list-count">${active ? `<b>${match.size}</b> of ${doc.entities.length} match` : `${doc.entities.length} things`}${n ? ` · <b>${n}</b> checked` : ""}</span>${active && unchecked ? `<button data-list="check">Check ${unchecked === match.size ? "all " : ""}${unchecked} match${unchecked === 1 ? "" : "es"}</button>` : ""}${active && checkedHere ? `<button data-list="uncheck">Uncheck ${checkedHere}</button>` : ""}${n ? `<button data-list="clear">Clear checks</button>` : ""}<span class="list-spacer"></span>${writable ? `<button data-list="add" title="Add a thing">＋ Add</button>` : ""}<button data-list="everything" title="Diagram everything (slow with a big inventory)">Everything</button><button data-list="diagram" class="primary" ${n ? "" : "disabled"}>Diagram ${n || ""} →</button>`;
+}
+function onListAction(ev: MouseEvent) {
+  const b = (ev.target as HTMLElement).closest<HTMLButtonElement>(
+    "[data-list]",
+  );
+  if (!b) return;
+  const what = b.dataset.list;
+  if (what === "check") listMatches.forEach((id) => checked.add(id));
+  else if (what === "uncheck") listMatches.forEach((id) => checked.delete(id));
+  else if (what === "clear") checked.clear();
+  else if (what === "add") return $("add").click();
+  else if (what === "everything") return setFocus(null);
+  else if (what === "diagram")
+    return setFocus({ entities: [...checked], hops: 0, direction: "both" });
+  renderListRows();
+}
+function onListClick(ev: MouseEvent) {
+  const target = ev.target as HTMLElement;
+  const row = target.closest<HTMLElement>("[data-row]");
+  if (!row) return;
+  const id = row.dataset.row!;
+  if (target.matches("[data-check]")) {
+    const box = target as HTMLInputElement;
+    if (box.checked) checked.add(id);
+    else checked.delete(id);
+    row.classList.toggle("checked", box.checked);
+    const terms = parseQuery(listQuery);
+    renderListActions(terms.length > 0, new Set(listMatches));
+    return;
+  }
+  if (target.closest("[data-twisty]")) {
+    if (listOpen.has(id)) listOpen.delete(id);
+    else listOpen.add(id);
+    renderListRows();
+    return;
+  }
+  selectEntity(id);
+  document
+    .querySelectorAll("#list-rows .list-row.selected")
+    .forEach((r) => r.classList.remove("selected"));
+  row.classList.add("selected");
+  renderInspector();
+  if (narrow()) openSheet({ kind: "entity", id });
+}
 function renderLayers() {
   $("layers").innerHTML = doc.layers
     .map(
@@ -1380,7 +1687,7 @@ const roleArrow = (r: Role) =>
 // wire, and its details.
 function connectionHtml(c: Connection, editable: boolean) {
   const layer = doc.layers.find((l) => l.id === c.layer)!;
-  const sharing = current.bundles.find((b) => b.connections.includes(c.id));
+  const sharing = current?.bundles.find((b) => b.connections.includes(c.id));
   const others = (sharing?.connections || []).filter((id) => id !== c.id);
   return `<span class="eyebrow"><span class="swatch" style="background:${esc(layer.color)}"></span>CONNECTION · ${esc(layer.name.toUpperCase())}</span><h2>${esc(c.name)}</h2><div class="ends"><h3>Ends</h3>${c.endpoints
     .map((ep) => {
@@ -2125,6 +2432,7 @@ function applyCamera() {
   $("zoom").textContent = `${Math.round(camera.scale * 100)}%`;
 }
 function fit() {
+  if (mode === "list" || !current) return;
   const box = $("canvas").getBoundingClientRect();
   const ps = [
     ...current.nodes.flatMap((n) => [
@@ -2582,6 +2890,7 @@ $("views").onchange = () => {
   );
   if (v) {
     view = structuredClone(v.view);
+    mode = "diagram";
     render();
     fit();
     status(`Loaded ${v.name}`);
@@ -2667,6 +2976,7 @@ async function start() {
   $<HTMLSelectElement>("views").disabled = offline;
   $("save-document").hidden = !writable;
   updateViews();
+  mode = offline || location.hash === "#everything" ? "diagram" : "list";
   render();
   // Status loads afterwards, on its own; drawing never waits for it.
   startLive();
@@ -2677,3 +2987,7 @@ async function start() {
   );
 }
 run(start)();
+$("to-list").onclick = () => {
+  mode = "list";
+  render();
+};

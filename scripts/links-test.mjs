@@ -56,7 +56,7 @@ try {
   await page.request.put(`${base}api/document`, {
     data: { revision: cur.revision, document: cur.document },
   });
-  await page.goto(base);
+  await page.goto(base + "#everything");
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
   );

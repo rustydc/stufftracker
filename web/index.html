@@ -51,7 +51,8 @@
               <h1>House connections</h1>
             </div>
             <div class="toolbar-actions">
-              <select id="views" aria-label="Saved views">
+              <button id="to-list" title="Back to the list">☰ List</button
+              ><select id="views" aria-label="Saved views">
                 <option value="">Unsaved view</option></select
               ><button id="filter" title="Show things by their details">
                 Filter</button
@@ -74,6 +75,7 @@
               <g id="scene"></g>
               <rect id="lasso" class="lasso" visibility="hidden" />
             </svg>
+            <section id="list" class="list-view" hidden></section>
             <div id="focus-bar" class="float-bar" hidden></div>
             <div id="filter-panel" class="filter-panel" hidden></div>
             <div id="pick-bar" class="float-bar pick" hidden></div>

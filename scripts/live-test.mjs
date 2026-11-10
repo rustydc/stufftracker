@@ -190,7 +190,7 @@ try {
       body: JSON.stringify(documents),
     }),
   );
-  await page.goto(base);
+  await page.goto(base + "#everything");
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
   );
@@ -321,7 +321,7 @@ try {
   await bare.route("**/api/live/*", (r) =>
     r.fulfill({ contentType: "application/json", body: '{"connected":false}' }),
   );
-  await bare.goto(base);
+  await bare.goto(base + "#everything");
   await bare.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
   );

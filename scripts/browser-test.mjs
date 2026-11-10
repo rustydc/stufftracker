@@ -24,7 +24,7 @@ try {
   for (const v of await (await page.request.get(`${base}api/views`)).json())
     if (v.name === "Browser test perspective")
       await page.request.delete(`${base}api/views/${v.id}`);
-  await page.goto(base);
+  await page.goto(base + "#everything");
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
   );
