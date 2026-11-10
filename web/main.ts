@@ -429,6 +429,14 @@ function portLive(
     return { ids, text: "off", tone: "off" };
   const parts: string[] = [];
   let tone: Tone = "muted";
+  // Link speed (Mbit/s) says whether anything is plugged in: 0 is down.
+  const speedId = find(/_link_speed$/);
+  const speed = speedId ? Number(states[speedId].state) : NaN;
+  if (Number.isFinite(speed)) {
+    if (speed <= 0) return { ids, text: "down", tone: "off" };
+    parts.push(speed >= 1000 ? `${speed / 1000}G` : `${speed}M`);
+    tone = "value";
+  }
   const poe = find(/^switch\..*_poe$/);
   const watts = known.find(
     (id) =>

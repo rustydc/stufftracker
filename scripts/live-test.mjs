@@ -68,6 +68,18 @@ const status = {
       changed: now,
       attributes: { unit_of_measurement: "W", device_class: "power" },
     },
+    "sensor.core_switch_port_2_link_speed": {
+      state: "1000",
+      name: "Port 2 Link speed",
+      changed: now,
+      attributes: { unit_of_measurement: "Mbit/s", device_class: "data_rate" },
+    },
+    "sensor.core_switch_port_4_link_speed": {
+      state: "0",
+      name: "Port 4 Link speed",
+      changed: now,
+      attributes: { unit_of_measurement: "Mbit/s", device_class: "data_rate" },
+    },
     "switch.core_switch_port_3_poe": {
       state: "off",
       name: "Port 3 PoE",
@@ -107,9 +119,11 @@ const status = {
       ],
       ports: {
         2: [
+          "sensor.core_switch_port_2_link_speed",
           "switch.core_switch_port_2_poe",
           "sensor.core_switch_port_2_poe_power",
         ],
+        4: ["sensor.core_switch_port_4_link_speed"],
         3: [
           "switch.core_switch_port_3_poe",
           "sensor.core_switch_port_3_poe_power",
@@ -210,7 +224,8 @@ try {
         text: g.textContent,
         tone: [...g.classList].find((c) => c !== "port-tag"),
       }));
-  assert.deepEqual(await tag("2"), { text: "4.2 W", tone: "on" });
+  assert.deepEqual(await tag("2"), { text: "1G 4.2 W", tone: "on" });
+  assert.deepEqual(await tag("4"), { text: "down", tone: "off" });
   assert.deepEqual(await tag("3"), { text: "PoE off", tone: "off" });
   assert.equal(
     await page
@@ -220,7 +235,7 @@ try {
   );
   await page.locator('.tree-row[data-select="router"]').click();
   const dev = await page.locator("#inspector .ha-device").textContent();
-  assert.match(dev, /2 ports — select a port/);
+  assert.match(dev, /3 ports — select a port/);
   assert.match(dev, /Core switch Temperature.*48\.2 °C/s);
   assert.doesNotMatch(dev, /Port 2 PoE/, "port entities live on the port");
   await page
