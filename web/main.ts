@@ -1053,20 +1053,27 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
     const l = p
       ? portLink(e, p)
       : { link: "unknown" as LinkLight, poe: "", title: "" };
+    // Mirrored on the right column, like a panel: the light at the outer
+    // edge, its number in the outer corner, the bolt toward the middle.
+    const mirror = b.side === "right";
     const h = b.height - 4,
-      x = b.x + 3,
+      x = mirror ? b.x + b.width - 29 : b.x + 3,
       y = b.y + 2;
     const bolt = l.poe
-      ? `<path class="bolt" transform="translate(${x + 17},${y + 2})" d="M4.2 0 L0 5.4 H2.8 L1.8 9.5 L6.2 3.6 H3.4 Z"/>`
+      ? `<path class="bolt" transform="translate(${mirror ? x + 3 : x + 17},${y + 2})" d="M4.2 0 L0 5.4 H2.8 L1.8 9.5 L6.2 3.6 H3.4 Z"/>`
       : "";
-    return `<g class="link-light ${l.link} ${l.poe}"><rect x="${x}" y="${y}" width="26" height="${h}" rx="3"/><text x="${x + 4}" y="${y + h - 4}">${esc(b.position || "·")}</text>${bolt}</g>`;
+    return `<g class="link-light ${l.link} ${l.poe}"><rect x="${x}" y="${y}" width="26" height="${h}" rx="3"/><text x="${mirror ? x + 22 : x + 4}" y="${y + h - 4}"${mirror ? ' text-anchor="end"' : ""}>${esc(b.position || "·")}</text>${bolt}</g>`;
   };
   // A port's live state (PoE draw, off, traffic) at its outer edge.
   const liveTag = (b: PortBox, p?: Port) => {
     const l = panel || b.segment ? null : portLive(e, p, f.kind !== "switch");
     if (!l?.text || b.height < 12) return { svg: "", width: 0 };
     const w = l.text.length * 4.6 + 8;
-    const x = b.x + b.width - w - (p?.protection ? 22 : 3);
+    // Inside the light on a mirrored switch column, else at the outer edge.
+    const x =
+      f.kind === "switch" && b.side === "right"
+        ? b.x + b.width - 32 - w
+        : b.x + b.width - w - (p?.protection ? 22 : 3);
     return {
       svg: `<g class="port-tag ${l.tone}"><rect x="${x}" y="${b.y + 2}" width="${w}" height="${Math.min(12, b.height - 4)}" rx="3"/><text x="${x + w / 2}" y="${b.y + 2 + Math.min(12, b.height - 4) / 2}">${esc(l.text)}</text></g>`,
       width: w + 3,
@@ -1081,7 +1088,11 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
     // the left.
     const handleW = panel && b.id ? HANDLE + 4 : 0;
     const badgeW = p?.protection ? 19 : 0;
-    const labelX = right ? b.x + handleW + badgeW + 5 : b.x + 38;
+    const labelX = right
+      ? b.x + handleW + badgeW + 5
+      : f.kind === "switch" && b.side === "right"
+        ? b.x + 8
+        : b.x + 38;
     const posX = right ? b.x + b.width - 5 : b.x + 5;
     const max = Math.max(
       4,

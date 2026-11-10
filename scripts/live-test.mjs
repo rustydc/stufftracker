@@ -265,6 +265,13 @@ try {
     [x2, y2] = await at("2"),
     [x15, y15] = await at("15");
   assert.ok(x2 > x1 && y2 === y1 && x15 === x1 && y15 > y1);
+  // Mirrored like a panel: the even column's light sits at its outer edge.
+  const lightX = (port) =>
+    page
+      .locator(`.node[data-id="router"] [data-port="${port}"] .link-light rect`)
+      .evaluate((r) => Number(r.getAttribute("x")));
+  assert.equal((await lightX("1")) - x1, 3);
+  assert.ok((await lightX("2")) - x2 > 100, "even light on the right");
   assert.deepEqual(await tag("3"), { text: "PoE off", tone: "off" });
   assert.equal(
     await page
