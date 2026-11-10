@@ -167,7 +167,10 @@ try {
   ]);
   const router = cur.document.entities.find((e) => e.id === "router");
   router.faceplate = "switch";
-  router.ports = [1, 2, 3, 4].map((n) => ({ id: String(n), position: n }));
+  router.ports = Array.from({ length: 16 }, (_, k) => ({
+    id: String(k + 1),
+    position: k + 1,
+  }));
   await page.request.put(`${base}api/document`, {
     data: { revision: cur.revision, document: cur.document },
   });
@@ -224,8 +227,44 @@ try {
         text: g.textContent,
         tone: [...g.classList].find((c) => c !== "port-tag"),
       }));
-  assert.deepEqual(await tag("2"), { text: "1G 4.2 W", tone: "on" });
-  assert.deepEqual(await tag("4"), { text: "down", tone: "off" });
+  // Link speed is the light's colour, so the tag only carries the draw.
+  assert.deepEqual(await tag("2"), { text: "4.2 W", tone: "on" });
+  const light = (port) =>
+    page
+      .locator(`.node[data-id="router"] [data-port="${port}"] .link-light`)
+      .evaluate((g) => ({
+        cls: [...g.classList].filter((c) => c !== "link-light").join(" "),
+        text: g.textContent,
+        bolt: !!g.querySelector(".bolt"),
+      }));
+  assert.deepEqual(await light("2"), {
+    cls: "gbe powered",
+    text: "2",
+    bolt: true,
+  });
+  assert.deepEqual(await light("3"), {
+    cls: "unknown poe",
+    text: "3",
+    bolt: true,
+  });
+  assert.deepEqual(await light("4"), { cls: "down", text: "4", bolt: false });
+  assert.deepEqual(await light("5"), {
+    cls: "unknown",
+    text: "5",
+    bolt: false,
+  });
+  // Sixteen ports: odd down the left, even down the right.
+  const at = (port) =>
+    page
+      .locator(`.node[data-id="router"] [data-port="${port}"] > rect`)
+      .evaluate((r) => [
+        Number(r.getAttribute("x")),
+        Number(r.getAttribute("y")),
+      ]);
+  const [x1, y1] = await at("1"),
+    [x2, y2] = await at("2"),
+    [x15, y15] = await at("15");
+  assert.ok(x2 > x1 && y2 === y1 && x15 === x1 && y15 > y1);
   assert.deepEqual(await tag("3"), { text: "PoE off", tone: "off" });
   assert.equal(
     await page

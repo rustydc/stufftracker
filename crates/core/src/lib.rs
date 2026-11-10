@@ -763,7 +763,16 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
     };
     let mut ports = Vec::new();
     let mut empty = Vec::new();
-    let width = if kind == Faceplate::Panel { 320. } else { 240. };
+    // A switch with more than 8 ports reads like its front panel: odd
+    // ports down the left, even down the right (single-width ports only).
+    let paired = kind == Faceplate::Switch
+        && e.ports.iter().filter_map(|p| p.position).max().unwrap_or(0) > 8
+        && e.ports.iter().all(|p| p.poles() == 1);
+    let width = if kind == Faceplate::Panel || paired {
+        320.
+    } else {
+        240.
+    };
     // Supplies first: a row each above the numbered positions.
     let mains: Vec<&Port> = e.ports.iter().filter(|p| p.main).collect();
     for (i, p) in mains.iter().enumerate() {
@@ -849,6 +858,32 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
                 rows = rows.max(row_of(space) + 1.);
             }
         }
+    } else if paired {
+        let col = (width - 30.) / 2.;
+        let place = |at: u32| {
+            let x = if at % 2 == 1 { 10. } else { 20. + col };
+            let side = if at % 2 == 1 { Side::Left } else { Side::Right };
+            row_box(x, top + ((at - 1) / 2) as f64, 1., col, side)
+        };
+        let mut taken = BTreeSet::new();
+        for p in e.ports.iter().filter(|p| p.position.is_some()) {
+            let at = p.position.unwrap();
+            taken.insert(at);
+            let mut b = place(at);
+            b.id = p.id.clone();
+            b.label = p.label.clone();
+            b.position = at.to_string();
+            ports.push(b);
+        }
+        let last = taken.iter().max().copied().unwrap_or(0);
+        for at in 1..=last + (last % 2) {
+            if !taken.contains(&at) {
+                let mut b = place(at);
+                b.position = at.to_string();
+                empty.push(b);
+            }
+        }
+        rows = top + (last.div_ceil(2)) as f64;
     } else {
         // One row per port, in port order; gaps in the numbering stay visible.
         let mut positioned: Vec<&Port> = e.ports.iter().filter(|p| p.position.is_some()).collect();
@@ -4756,6 +4791,38 @@ mod tests {
         let unassigned = face.unassigned.unwrap();
         assert_eq!(unassigned.y, FACE_HEADER + 3. * FACE_ROW);
         assert_eq!(size.height, FACE_HEADER + 4. * FACE_ROW + 8.);
+    }
+    #[test]
+    fn big_switch_faceplate_pairs_odd_and_even_ports() {
+        let doc = panel_doc();
+        let mut sw = doc
+            .entities
+            .iter()
+            .find(|e| e.id == "panel")
+            .unwrap()
+            .clone();
+        sw.faceplate = Some(Faceplate::Switch);
+        sw.ports = (1..=16)
+            .filter(|n| *n != 4)
+            .map(|n| port(&n.to_string(), n, 1, None))
+            .collect();
+        let (size, face) = faceplate_layout(&sw, false);
+        let b = |id: &str| face.ports.iter().find(|b| b.id == id).unwrap();
+        assert_eq!(b("1").side, Side::Left);
+        assert_eq!(b("2").side, Side::Right);
+        assert_eq!(b("1").y, b("2").y);
+        assert_eq!(b("16").y, b("15").y);
+        assert_eq!(b("15").y, b("1").y + 7. * FACE_ROW);
+        assert_eq!(face.empty.len(), 1);
+        assert_eq!(face.empty[0].position, "4");
+        assert_eq!(face.empty[0].side, Side::Right);
+        assert_eq!(size.width, 320.);
+        assert_eq!(size.height, FACE_HEADER + 8. * FACE_ROW + 8.);
+        // Eight ports stay one per row.
+        sw.ports.retain(|p| p.position.unwrap() <= 8);
+        let (size, face) = faceplate_layout(&sw, false);
+        assert_eq!(size.width, 240.);
+        assert!(face.ports.iter().all(|b| b.side == Side::Either));
     }
     fn linked(id: &str, position: u32, halves: [&str; 2]) -> Port {
         Port {

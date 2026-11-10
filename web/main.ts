@@ -417,6 +417,7 @@ function cardStatus(e: Entity): { text: string; tone: Tone } | null {
 function portLive(
   e: Entity,
   p?: Port,
+  withLink = true,
 ): { ids: string[]; text: string; tone: Tone } | null {
   if (!p?.position || !liveStatus?.entities) return null;
   const ids = devicesOf(e).flatMap((d) => d.ports[String(p.position)] || []);
@@ -432,7 +433,7 @@ function portLive(
   // Link speed (Mbit/s) says whether anything is plugged in: 0 is down.
   const speedId = find(/_link_speed$/);
   const speed = speedId ? Number(states[speedId].state) : NaN;
-  if (Number.isFinite(speed)) {
+  if (Number.isFinite(speed) && withLink) {
     if (speed <= 0) return { ids, text: "down", tone: "off" };
     parts.push(speed >= 1000 ? `${speed / 1000}G` : `${speed}M`);
     tone = "value";
@@ -465,6 +466,51 @@ function portLive(
   }
   if (!parts.length) return { ids, text: "", tone };
   return { ids, text: parts.join(" "), tone };
+}
+// A switch port's link light, like the switch's own app: gigabit, fast
+// ethernet, nothing plugged in, or switched off; and whether it has PoE
+// (it has PoE entities, even turned-off ones) and is powering something.
+type LinkLight = "gbe" | "fe" | "down" | "off" | "unknown";
+function portLink(
+  e: Entity,
+  p?: Port,
+): { link: LinkLight; poe: "" | "poe" | "powered"; title: string } {
+  const none = { link: "unknown" as LinkLight, poe: "" as const, title: "" };
+  if (!p?.position || !liveStatus?.entities) return none;
+  const devices = devicesOf(e);
+  const ids = devices.flatMap((d) => d.ports[String(p.position)] || []);
+  const here = new RegExp(`_port_${p.position}_`);
+  const disabled = devices
+    .flatMap((d) => d.disabled)
+    .filter((id) => here.test(id));
+  const states = liveStatus.entities;
+  const find = (re: RegExp) => ids.find((id) => states[id] && re.test(id));
+  let link: LinkLight = "unknown";
+  const enable = find(/^switch\..*_port_\d+$/);
+  const speedId = find(/_link_speed$/);
+  const speed = speedId ? Number(states[speedId].state) : NaN;
+  if (enable && states[enable].state === "off") link = "off";
+  else if (Number.isFinite(speed))
+    link = speed >= 1000 ? "gbe" : speed > 0 ? "fe" : "down";
+  const watts = ids.find(
+    (id) => states[id]?.attributes.device_class === "power",
+  );
+  const w = watts ? Number(states[watts].state) : NaN;
+  const hasPoe = [...ids, ...disabled].some((id) => /_poe(_power)?$/.test(id));
+  const poe = Number.isFinite(w) && w > 0 ? "powered" : hasPoe ? "poe" : "";
+  const title = [
+    {
+      gbe: `link ${speed >= 1000 ? speed / 1000 + " Gbit/s" : ""}`,
+      fe: `link ${speed} Mbit/s`,
+      down: "nothing plugged in",
+      off: "port turned off",
+      unknown: "",
+    }[link],
+    poe === "powered" ? `PoE ${w} W` : poe ? "PoE" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return { link, poe, title };
 }
 // A status pill, right-aligned at (right, top) in the node's coordinates.
 function pillSvg(e: Entity, right: number, top: number, max: number) {
@@ -1001,9 +1047,23 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
       )
       .join("");
   };
+  // On a switch, each port number sits in its link light, with a bolt
+  // for PoE (bright when it powers something).
+  const lightSq = (b: PortBox, p?: Port) => {
+    const l = p
+      ? portLink(e, p)
+      : { link: "unknown" as LinkLight, poe: "", title: "" };
+    const h = b.height - 4,
+      x = b.x + 3,
+      y = b.y + 2;
+    const bolt = l.poe
+      ? `<path class="bolt" transform="translate(${x + 17},${y + 2})" d="M4.2 0 L0 5.4 H2.8 L1.8 9.5 L6.2 3.6 H3.4 Z"/>`
+      : "";
+    return `<g class="link-light ${l.link} ${l.poe}"><rect x="${x}" y="${y}" width="26" height="${h}" rx="3"/><text x="${x + 4}" y="${y + h - 4}">${esc(b.position || "·")}</text>${bolt}</g>`;
+  };
   // A port's live state (PoE draw, off, traffic) at its outer edge.
   const liveTag = (b: PortBox, p?: Port) => {
-    const l = panel || b.segment ? null : portLive(e, p);
+    const l = panel || b.segment ? null : portLive(e, p, f.kind !== "switch");
     if (!l?.text || b.height < 12) return { svg: "", width: 0 };
     const w = l.text.length * 4.6 + 8;
     const x = b.x + b.width - w - (p?.protection ? 22 : 3);
@@ -1028,7 +1088,12 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
       Math.floor((b.width - 44 - handleW - badgeW - tag.width) / 6.2),
     );
     const small = b.height < 14;
-    return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/>${positions(b, posX, right)}<text class="slot-label ${small ? "tiny mid" : ""}" x="${labelX}" y="${b.y + (small ? b.height / 2 : 13)}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text>${handle(b, p)}${badge(b, p)}${tag.svg}<title>${esc(title)}${tag.svg ? `\nHome Assistant: ${esc(portLive(e, p)!.text)}` : ""}</title></g>`;
+    const number =
+      f.kind === "switch" && b.height >= 14 && b !== f.unassigned
+        ? lightSq(b, p)
+        : positions(b, posX, right);
+    const link = f.kind === "switch" && p ? portLink(e, p).title : "";
+    return `<g class="slot ${cls}" ${b.id ? `data-port="${esc(b.id)}"` : ""}><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/>${number}<text class="slot-label ${small ? "tiny mid" : ""}" x="${labelX}" y="${b.y + (small ? b.height / 2 : 13)}">${esc(text.length > max ? text.slice(0, max - 1) + "…" : text)}</text>${handle(b, p)}${badge(b, p)}${tag.svg}<title>${esc(title)}${link ? `\n${esc(link)}` : ""}${tag.svg ? `\nHome Assistant: ${esc(portLive(e, p)!.text)}` : ""}</title></g>`;
   };
   const rating = (p?: Port) =>
     [

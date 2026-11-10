@@ -1460,3 +1460,55 @@ label.toggle {
   color: #6d7d6c;
   padding: 4px 0;
 }
+/* A switch port's link light: gigabit, fast ethernet, unplugged, off. */
+.node.faceplate .slot .link-light rect {
+  fill: #fff;
+  stroke: #cfd6cc;
+  stroke-width: 0.8;
+}
+.node.faceplate .slot .link-light text {
+  font-size: 9px;
+  font-weight: 650;
+  fill: #6d7d6c;
+  pointer-events: none;
+}
+.node.faceplate .slot .link-light.gbe rect {
+  fill: #3cc864;
+  stroke: #2fae53;
+}
+.node.faceplate .slot .link-light.fe rect {
+  fill: #acd02a;
+  stroke: #94b51f;
+}
+.node.faceplate .slot .link-light.down rect {
+  fill: #cfd3d8;
+  stroke: #c1c6cc;
+}
+.node.faceplate .slot .link-light.off rect {
+  fill: #eceef0;
+  stroke: #d3d7db;
+  stroke-dasharray: 2 1.5;
+}
+.node.faceplate .slot .link-light.gbe text,
+.node.faceplate .slot .link-light.fe text,
+.node.faceplate .slot .link-light.down text {
+  fill: #fff;
+}
+.node.faceplate .slot .link-light .bolt {
+  fill: #b5bdb2;
+  pointer-events: none;
+}
+.node.faceplate .slot .link-light.gbe .bolt,
+.node.faceplate .slot .link-light.fe .bolt,
+.node.faceplate .slot .link-light.down .bolt {
+  fill: rgba(255, 255, 255, 0.75);
+}
+.node.faceplate .slot .link-light.powered .bolt {
+  fill: #fff;
+  stroke: #f2b705;
+  stroke-width: 0.6;
+}
+.node.faceplate .slot .link-light.unknown.powered .bolt {
+  fill: #f2b705;
+  stroke: none;
+}
