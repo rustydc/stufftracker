@@ -89,7 +89,12 @@ automation. Subsequent boots preserve your data.
   has a checkbox, and checks stay as you change the query, so you can
   gather things with several queries; **Diagram N →** draws just the
   checked things (inside their spaces), with the usual hops and direction
-  controls. **☰ List** comes back, checks intact. **Everything** draws the
+  controls. **☰ List** comes back, checks intact. A trace ("What feeds this", "Show
+  only this", a filter, picked things or a saved view with a focus) opens as
+  a dialog over what you were looking at: **✓ Keep these** checks just what
+  it shows and diagrams them, **＋ Add to checked** adds them to the checks
+  and diagrams the lot, and **↩ Back** returns to where you were (the list
+  or the previous diagram). **Everything** draws the
   whole inventory, and choosing a saved view opens it. A detail's key or ⧉
   button filters the list. Open `#everything` to start on the full diagram.
 - **Filters.** **Filter** (beside the saved views) shows only the things whose

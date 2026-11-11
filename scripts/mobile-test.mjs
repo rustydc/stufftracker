@@ -156,7 +156,7 @@ try {
           .sort(),
       );
       assert.deepEqual(traced, ["ha", "lamp", "panel", "router"]);
-      await page.locator("#exit-focus").click();
+      await page.locator("#trace-back").click();
       await page.locator("#fit").click();
 
       // Select mode: taps pick, then show only those.
@@ -177,7 +177,7 @@ try {
         await page.locator("#select-mode").getAttribute("aria-pressed"),
         "false",
       );
-      await page.locator("#exit-focus").click();
+      await page.locator("#trace-back").click();
 
       if (online) {
         await page.locator("#fit").click();

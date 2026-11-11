@@ -136,6 +136,51 @@ try {
     await page.locator("#list-query").inputValue(),
     'has:"IP address"',
   );
+  // A trace opens as a dialog over the list: Back returns to the list with
+  // checks untouched; Add puts what it shows into the checks; Keep checks
+  // just those.
+  await query("router");
+  await page.locator('[data-row="router"] .list-name').click();
+  await page.locator('#inspector [data-focus="upstream"]').click();
+  await page.waitForSelector("#trace-keep");
+  await page.locator("#trace-back").click();
+  assert.ok(await page.locator("#list").isVisible());
+  assert.match(await count(), / · 1 checked/);
+  await page.locator('#inspector [data-focus="both"]').click();
+  await page.waitForSelector("#trace-add");
+  const traced = await page
+    .locator(".node")
+    .evaluateAll((n) =>
+      n.filter((x) => !x.classList.contains("space")).map((x) => x.dataset.id),
+    );
+  assert.ok(traced.length > 1, "router and its neighbours");
+  await page.locator("#trace-add").click();
+  assert.equal(await page.locator("#trace-add").count(), 0, "dialog closed");
+  const kept = await page
+    .locator(".node")
+    .evaluateAll((n) =>
+      n.filter((x) => !x.classList.contains("space")).map((x) => x.dataset.id),
+    );
+  assert.deepEqual(kept.sort(), traced.sort(), "the same things stay shown");
+  await page.locator("#to-list").click();
+  assert.match(await count(), new RegExp(` · ${traced.length} checked`));
+  // From a diagram: a trace, then Keep replaces the checks with its things.
+  await page.locator('[data-list="diagram"]').click();
+  await page.locator('.node[data-id="router"]').first().click();
+  await page.locator('#inspector [data-focus="upstream"]').click();
+  await page.waitForSelector("#trace-keep");
+  const up = await page
+    .locator(".node")
+    .evaluateAll((n) =>
+      n.filter((x) => !x.classList.contains("space")).map((x) => x.dataset.id),
+    );
+  await page.locator("#trace-keep").click();
+  await page.locator("#to-list").click();
+  assert.match(await count(), new RegExp(` · ${up.length} checked`));
+  await query("is:checked -kind:space");
+  assert.match(await count(), new RegExp(`^${up.length} of`));
+  await query("");
+
   // Everything is still one click away.
   await page.locator('[data-list="everything"]').click();
   await page.waitForFunction(
@@ -159,7 +204,7 @@ try {
   await phone.close();
   assert.deepEqual(errors, []);
   console.log(
-    "List checks passed: no layout on load, tree and folding, typed filter (kind, detail prefix, quotes, negation, is:checked), context rows, checks across queries, detail key buttons, diagram of the checked, back to the list, everything, phone sheet.",
+    "List checks passed: no layout on load, tree and folding, typed filter (kind, detail prefix, quotes, negation, is:checked), context rows, checks across queries, detail key buttons, diagram of the checked, trace Back/Add/Keep, back to the list, everything, phone sheet.",
   );
 } finally {
   if (original) {

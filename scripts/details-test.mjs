@@ -137,7 +137,7 @@ try {
   );
   await page.locator('#focus-bar [data-hops="1"]').click();
   assert((await leaves()).length > 3, "one hop brings the router's neighbours");
-  await page.locator("#exit-focus").click();
+  await page.locator("#trace-back").click();
   // Typing a value counts matches live; "contains" on any field.
   await page.locator("#filter").click();
   await page.locator('.filter-row [data-field="value"]').fill("ubiquiti");
@@ -151,7 +151,7 @@ try {
   await page.locator('.tree-row[data-select="router"]').click();
   await page.locator('#inspector [data-has-key="IP address"]').click();
   assert.deepEqual(await leaves(), ["router"]);
-  await page.locator("#exit-focus").click();
+  await page.locator("#trace-back").click();
   await page.locator('.tree-row[data-select="router"]').click();
   await page.locator('#inspector [data-same-key="IP address"]').click();
   assert.match(
@@ -165,7 +165,7 @@ try {
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("View saved"),
   );
-  await page.locator("#exit-focus").click();
+  await page.locator("#trace-back").click();
   await page.reload();
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
@@ -173,12 +173,12 @@ try {
   await page.locator("#views").selectOption({ label: "Has an IP" });
   await page.waitForSelector("#focus-bar:not([hidden])");
   assert.deepEqual(await leaves(), ["router"]);
-  await page.locator("#exit-focus").click();
+  await page.locator("#trace-back").click();
   // The inventory search can put its matches on the canvas.
   await page.locator("#search").fill("192.168");
   await page.locator("#search-show").click();
   assert.deepEqual(await leaves(), ["router"]);
-  await page.locator("#exit-focus").click();
+  await page.locator("#trace-back").click();
   await page.locator("#search").fill("");
   for (const v of await (await page.request.get(`${base}api/views`)).json())
     if (v.name === "Has an IP")

@@ -166,12 +166,12 @@ try {
   await cond.locator('[data-field="op"]').selectOption("exists");
   await page.locator("#apply-filter").click();
   assert.deepEqual(await leaves(), ["tap", "water"]);
-  await page.locator("#exit-focus").click();
+  await page.locator("#trace-back").click();
   await page.locator('.tree-row[data-select="panel"]').click();
   await page.locator('#inspector [data-select-port="panel:1"]').click();
   await page.locator('#inspector [data-has-key="Wire"]').click();
   assert.deepEqual(await leaves(), ["panel"]);
-  await page.locator("#exit-focus").click();
+  await page.locator("#trace-back").click();
   assert.deepEqual(errors, []);
   console.log(
     "Links checks passed: clicking wires, connection inspector and details, ends and lists, port inspector from schedule and faceplate, port details, saving, filtering by both.",

@@ -187,7 +187,51 @@ function applyLayout(layout: Layout) {
   if (view.focus && layout.focus_positions)
     view.focus.positions = layout.focus_positions;
 }
-function setFocus(focus: Focus | null) {
+// A trace ("what feeds this", "show only this", a filter) opens as a dialog
+// over what you were looking at; before is that, for Back.
+let traceOpen = false;
+let before: { mode: "list" | "diagram"; focus?: Focus } | null = null;
+function openTrace(focus: Focus) {
+  if (!traceOpen)
+    before = {
+      mode,
+      ...(view.focus ? { focus: structuredClone(view.focus) } : {}),
+    };
+  setFocus(focus, true);
+}
+// What the trace shows: its things, not the spaces drawn only around them.
+function shownThings() {
+  const named = new Set(view.focus?.entities || []);
+  return current.nodes
+    .filter((n) => !n.container || n.collapsed || named.has(n.id))
+    .map((n) => n.id);
+}
+function closeTrace(how: "keep" | "add" | "back") {
+  if (how === "back") {
+    const b = before;
+    traceOpen = false;
+    before = null;
+    if (b?.mode === "list") {
+      if (b.focus) view.focus = b.focus;
+      else delete view.focus;
+      mode = "list";
+      render();
+    } else setFocus(b?.focus || null);
+    return;
+  }
+  const shown = shownThings();
+  if (how === "keep") checked.clear();
+  shown.forEach((id) => checked.add(id));
+  setFocus({ entities: [...checked], hops: 0, direction: "both" });
+  status(
+    how === "keep"
+      ? `Kept ${shown.length} things, checked`
+      : `Added ${shown.length} things: ${checked.size} checked`,
+  );
+}
+function setFocus(focus: Focus | null, trace = false) {
+  traceOpen = trace;
+  if (!trace) before = null;
   mode = "diagram";
   if (focus) view.focus = focus;
   else delete view.focus;
@@ -735,7 +779,7 @@ function showMatching(filter: Filter) {
     setListQuery(filterToQuery(filter));
     return;
   }
-  setFocus({ entities: [], hops: 0, direction: "both", filter });
+  openTrace({ entities: [], hops: 0, direction: "both", filter });
 }
 // The filter being edited in the panel, until shown.
 let filterDraft: Filter | null = null;
@@ -893,24 +937,38 @@ function renderBars() {
           : dir === "downstream"
             ? "What is fed by"
             : "Around";
-    bar.innerHTML = `<span class="focus-label">${lead} <b>${esc(what)}</b> · ${current.nodes.filter((n) => !n.container || n.collapsed).length} shown</span><span class="seg" role="group" aria-label="Direction">${(["both", "upstream", "downstream"] as const).map((d) => `<button data-dir="${d}" class="${d === dir ? "on" : ""}">${{ both: "↔ Both", upstream: "↑ Feeds", downstream: "↓ Fed" }[d]}</button>`).join("")}</span><span class="seg" role="group" aria-label="Hops">${(["0", "1", "2", "3", "all"] as const).map((h) => `<button data-hops="${h}" class="${String(f.hops ?? "all") === h ? "on" : ""}" title="${h === "0" ? "Only these things" : h === "all" ? "Everything connected" : `${h} connection${h === "1" ? "" : "s"} away`}">${h === "0" ? "Only" : h === "all" ? "All" : h}</button>`).join("")}</span><button id="exit-focus">✕ Show everything</button>`;
-    bar.querySelectorAll<HTMLButtonElement>("[data-dir]").forEach(
-      (b) =>
-        (b.onclick = () =>
-          setFocus({
-            ...view.focus!,
-            direction: b.dataset.dir as Direction,
-          })),
-    );
+    bar.innerHTML = `<span class="focus-label">${lead} <b>${esc(what)}</b> · ${current.nodes.filter((n) => !n.container || n.collapsed).length} shown</span><span class="seg" role="group" aria-label="Direction">${(["both", "upstream", "downstream"] as const).map((d) => `<button data-dir="${d}" class="${d === dir ? "on" : ""}">${{ both: "↔ Both", upstream: "↑ Feeds", downstream: "↓ Fed" }[d]}</button>`).join("")}</span><span class="seg" role="group" aria-label="Hops">${(["0", "1", "2", "3", "all"] as const).map((h) => `<button data-hops="${h}" class="${String(f.hops ?? "all") === h ? "on" : ""}" title="${h === "0" ? "Only these things" : h === "all" ? "Everything connected" : `${h} connection${h === "1" ? "" : "s"} away`}">${h === "0" ? "Only" : h === "all" ? "All" : h}</button>`).join("")}</span>${
+      traceOpen
+        ? `<span class="trace-exits" role="group" aria-label="Close"><button id="trace-keep" class="primary" title="Check just these and show only them">✓ Keep these</button><button id="trace-add" title="Add these to what's checked, and show them all">＋ Add<span class="long"> to checked</span>${checked.size ? ` (${checked.size})` : ""}</button><button id="trace-back" title="Back to what you were looking at">↩ Back</button></span>`
+        : ""
+    }`;
+    bar
+      .querySelectorAll<HTMLButtonElement>("[data-dir]")
+      .forEach(
+        (b) =>
+          (b.onclick = () =>
+            setFocus(
+              { ...view.focus!, direction: b.dataset.dir as Direction },
+              traceOpen,
+            )),
+      );
     bar.querySelectorAll<HTMLButtonElement>("[data-hops]").forEach(
       (b) =>
         (b.onclick = () =>
-          setFocus({
-            ...view.focus!,
-            hops: b.dataset.hops === "all" ? undefined : Number(b.dataset.hops),
-          })),
+          setFocus(
+            {
+              ...view.focus!,
+              hops:
+                b.dataset.hops === "all" ? undefined : Number(b.dataset.hops),
+            },
+            traceOpen,
+          )),
     );
-    $("exit-focus").onclick = () => setFocus(null);
+    if (traceOpen) {
+      $("trace-keep").onclick = () => closeTrace("keep");
+      $("trace-add").onclick = () => closeTrace("add");
+      $("trace-back").onclick = () => closeTrace("back");
+    }
   }
   const pick = $("pick-bar");
   pick.hidden = !picked.size;
@@ -923,7 +981,7 @@ function renderBars() {
   }
   if (picked.size) {
     $("focus-picked").onclick = () =>
-      setFocus({ entities: [...picked], hops: 0, direction: "both" });
+      openTrace({ entities: [...picked], hops: 0, direction: "both" });
     $("clear-picked").onclick = () => {
       picked.clear();
       renderScene();
@@ -1756,7 +1814,7 @@ function renderConnectionInspector(): boolean {
   wireDetailFilters(root);
   root.querySelector<HTMLButtonElement>("[data-focus-connection]")!.onclick =
     () =>
-      setFocus({
+      openTrace({
         entities: c.endpoints.map((ep) => ep.entity),
         hops: 0,
         direction: "both",
@@ -2216,7 +2274,7 @@ function wireEntityActions(root: HTMLElement, e: Entity) {
       (b.onclick = () => {
         const direction = b.dataset.focus as Direction;
         sheetId = null;
-        setFocus({
+        openTrace({
           entities: [e.id],
           hops: direction === "both" ? 1 : undefined,
           direction,
@@ -2300,7 +2358,7 @@ function renderSheet() {
       () => {
         sheetTarget = null;
         renderSheet();
-        setFocus({
+        openTrace({
           entities: c.endpoints.map((ep) => ep.entity),
           hops: 0,
           direction: "both",
@@ -2911,8 +2969,14 @@ $("views").onchange = () => {
     (v) => v.id === $<HTMLSelectElement>("views").value,
   );
   if (v) {
+    // A view with a focus opens like a trace: Back returns to where you were.
+    const was = traceOpen
+      ? before
+      : { mode, ...(view.focus ? { focus: structuredClone(view.focus) } : {}) };
     view = structuredClone(v.view);
     mode = "diagram";
+    traceOpen = !!view.focus;
+    before = traceOpen ? was : null;
     render();
     fit();
     status(`Loaded ${v.name}`);

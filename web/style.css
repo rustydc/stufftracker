@@ -1725,3 +1725,36 @@ label.toggle {
 .node.faceplate .slot .link-light.down .uplink {
   stroke: #fff;
 }
+/* A trace's ways out: keep its things, add them to the checks, or go back. */
+.trace-exits {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+.trace-exits button {
+  white-space: nowrap;
+}
+@media (max-width: 540px) {
+  .trace-exits .long {
+    display: none;
+  }
+  .trace-exits button {
+    padding: 6px 9px;
+  }
+  .canvas-toolbar {
+    height: auto;
+    min-height: 84px;
+    gap: 8px;
+  }
+  .toolbar-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 62%;
+  }
+  .toolbar-actions button,
+  .toolbar-actions select {
+    padding: 5px 8px;
+    font-size: 12px;
+  }
+}

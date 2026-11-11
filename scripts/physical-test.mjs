@@ -249,7 +249,7 @@ try {
   // Widening the focus keeps that arrangement.
   await page.locator('#focus-bar [data-hops="2"]').click();
   assert.equal((await sensorAt()).y, s1.y);
-  await page.locator("#exit-focus").click();
+  await page.locator("#trace-back").click();
   assert(await page.locator("#focus-bar").isHidden());
   assert.deepEqual(
     await geometry("kitchen"),
@@ -272,7 +272,7 @@ try {
   );
   assert.deepEqual(only, ["desk", "tv"]);
   assert(await page.locator("#pick-bar").isHidden());
-  await page.locator("#exit-focus").click();
+  await page.locator("#trace-back").click();
   assert.deepEqual(errors, []);
   console.log(
     "Physical checks passed: breaker schedule, faceplates, port pins, mains and linked half-space breakers, port editor, focus and trace, arranging within a focus, picking.",
