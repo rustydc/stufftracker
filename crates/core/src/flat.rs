@@ -176,6 +176,9 @@ fn arrange(
     // Per thing: (neighbour, where the wire meets this thing, where it meets
     // the neighbour), as offsets from each top (a faceplate port's row).
     let mut adj: Vec<Vec<(usize, Option<f64>, Option<f64>)>> = vec![Vec::new(); n];
+    // Parallel to `adj`: which edge each end's port leaves by (-1 left, 1
+    // right, 0 any side).
+    let mut adj_side: Vec<Vec<(i8, i8)>> = vec![Vec::new(); n];
     for c in &doc.connections {
         let at: Vec<(usize, &Role)> = c
             .endpoints
@@ -220,6 +223,9 @@ fn arrange(
                 let y = |p: Option<(f64, i8)>| p.map(|(y, _)| y);
                 adj[a].push((b, y(port_of(a)), y(port_of(b))));
                 adj[b].push((a, y(port_of(b)), y(port_of(a))));
+                let side = |p: Option<(f64, i8)>| p.map_or(0, |(_, s)| s);
+                adj_side[a].push((side(port_of(a)), side(port_of(b))));
+                adj_side[b].push((side(port_of(b)), side(port_of(a))));
             }
         }
     }
@@ -445,70 +451,221 @@ fn arrange(
         // Heights: start stacked and centred, then line each thing up with
         // the median of where its wires meet its neighbours, keeping each
         // column's order and spacing (an exact least-squares fit).
-        let heights: Vec<f64> = layers
-            .iter()
-            .map(|l| {
-                l.iter().map(|v| size(*v).height).sum::<f64>()
-                    + ROW_GAP * l.len().saturating_sub(1) as f64
-            })
-            .collect();
-        let tallest = heights.iter().copied().fold(0., f64::max);
-        let mut top = vec![0f64; n];
-        for (r, layer) in layers.iter().enumerate() {
-            let mut ly = (tallest - heights[r]) / 2.;
-            for v in layer {
-                top[*v] = ly;
-                ly += size(*v).height + ROW_GAP;
+        let align = |layers: &Vec<Vec<usize>>, layer_of: &Vec<usize>| -> Vec<f64> {
+            let depth = layers.len();
+            let heights: Vec<f64> = layers
+                .iter()
+                .map(|l| {
+                    l.iter().map(|v| size(*v).height).sum::<f64>()
+                        + ROW_GAP * l.len().saturating_sub(1) as f64
+                })
+                .collect();
+            let tallest = heights.iter().copied().fold(0., f64::max);
+            let mut top = vec![0f64; n];
+            for (r, layer) in layers.iter().enumerate() {
+                let mut ly = (tallest - heights[r]) / 2.;
+                for v in layer {
+                    top[*v] = ly;
+                    ly += size(*v).height + ROW_GAP;
+                }
             }
-        }
-        let passes: Vec<(usize, Vec<usize>)> = {
-            let mut p = Vec::new();
             for it in 0..6 {
+                let mut passes: Vec<(usize, [usize; 2])> = Vec::new();
                 for r in 1..depth {
-                    p.push((r, vec![r - 1]));
+                    passes.push((r, [r - 1, usize::MAX]));
                 }
                 for r in (0..depth.saturating_sub(1)).rev() {
-                    p.push((r, vec![r + 1]));
+                    passes.push((r, [r + 1, usize::MAX]));
                 }
                 if it >= 4 {
                     for r in 0..depth {
-                        p.push((r, vec![r.wrapping_sub(1), r + 1]));
+                        passes.push((r, [r.wrapping_sub(1), r + 1]));
+                    }
+                }
+                for (r, nears) in passes {
+                    let layer = &layers[r];
+                    let desired: Vec<f64> = layer
+                        .iter()
+                        .map(|v| {
+                            let mut at: Vec<f64> = adj[*v]
+                                .iter()
+                                .filter(|(w, _, _)| nears.contains(&layer_of[*w]))
+                                .map(|(w, own, wo)| top[*w] + offset(*w, *wo) - offset(*v, *own))
+                                .collect();
+                            if at.is_empty() {
+                                return top[*v];
+                            }
+                            at.sort_by(f64::total_cmp);
+                            let m = at.len() / 2;
+                            if at.len() % 2 == 1 {
+                                at[m]
+                            } else {
+                                (at[m - 1] + at[m]) / 2.
+                            }
+                        })
+                        .collect();
+                    let hs: Vec<f64> = layer.iter().map(|v| size(*v).height).collect();
+                    for (v, y) in layer.iter().zip(fit_in_order(&desired, &hs, ROW_GAP)) {
+                        top[*v] = y;
                     }
                 }
             }
-            p
+            top
         };
-        for (r, nears) in passes {
-            let layer = &layers[r];
-            let desired: Vec<f64> = layer
+        // How tangled a placement is: crossings of the straight lines between
+        // where wires meet their cards (each wire leaving by the side that
+        // faces its other end), then total length.
+        let tangle = |layers: &Vec<Vec<usize>>, layer_of: &Vec<usize>, top: &Vec<f64>| -> f64 {
+            let mut x = vec![0f64; layers.len()];
+            for r in 1..layers.len() {
+                let width = layers[r - 1]
+                    .iter()
+                    .map(|v| size(*v).width)
+                    .fold(0., f64::max);
+                x[r] = x[r - 1] + width + COLUMN_GAP;
+            }
+            let mut segs: Vec<(usize, usize, Point, Point)> = Vec::new();
+            let mut wraps = 0usize;
+            for v in members {
+                for (k, (w, own, wo)) in adj[*v].iter().enumerate() {
+                    if *w < *v {
+                        continue;
+                    }
+                    let (xv, xw) = (x[layer_of[*v]], x[layer_of[*w]]);
+                    // A port leaves by its own edge; facing away from the
+                    // other end, the wire has to wrap around its card.
+                    let (sv, sw) = adj_side[*v][k];
+                    for (s, here, there) in [(sv, xv, xw), (sw, xw, xv)] {
+                        if s != 0 && (there - here) * s as f64 <= 0. {
+                            wraps += 1;
+                        }
+                    }
+                    let side = |at: f64, other: f64, u: usize| {
+                        if other > at { at + size(u).width } else { at }
+                    };
+                    segs.push((
+                        *v,
+                        *w,
+                        Point {
+                            x: side(xv, xw, *v),
+                            y: top[*v] + offset(*v, *own),
+                        },
+                        Point {
+                            x: side(xw, xv, *w),
+                            y: top[*w] + offset(*w, *wo),
+                        },
+                    ));
+                }
+            }
+            let orient = |a: Point, b: Point, c: Point| {
+                (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+            };
+            let mut crossed = 0usize;
+            let mut length = 0.;
+            for (k, (a, b, p, q)) in segs.iter().enumerate() {
+                length += distance(*p, *q);
+                for (c, d, r, t) in &segs[k + 1..] {
+                    if a == c || a == d || b == c || b == d {
+                        continue;
+                    }
+                    let (o1, o2) = (orient(*p, *q, *r), orient(*p, *q, *t));
+                    let (o3, o4) = (orient(*r, *t, *p), orient(*r, *t, *q));
+                    if o1 * o2 < 0. && o3 * o4 < 0. {
+                        crossed += 1;
+                    }
+                }
+            }
+            // Flow: each feed should still run the way the ranking set it.
+            let against = members
                 .iter()
-                .map(|v| {
-                    let mut at: Vec<f64> = adj[*v]
-                        .iter()
-                        .filter(|(w, _, _)| {
-                            nears
-                                .iter()
-                                .any(|near| *near < depth && in_layer(*w, *near))
-                        })
-                        .map(|(w, own, wo)| top[*w] + offset(*w, *wo) - offset(*v, *own))
-                        .collect();
-                    if at.is_empty() {
-                        return top[*v];
-                    }
-                    at.sort_by(f64::total_cmp);
-                    let m = at.len() / 2;
-                    if at.len() % 2 == 1 {
-                        at[m]
-                    } else {
-                        (at[m - 1] + at[m]) / 2.
-                    }
+                .flat_map(|v| dag[*v].keys().map(move |w| (*v, *w)))
+                .filter(|(v, w)| {
+                    let want = (rank[*w] - rank[*v]).signum();
+                    want != 0 && (layer_of[*w] as i64 - layer_of[*v] as i64).signum() != want
                 })
-                .collect();
-            let hs: Vec<f64> = layer.iter().map(|v| size(*v).height).collect();
-            for (v, y) in layer.iter().zip(fit_in_order(&desired, &hs, ROW_GAP)) {
-                top[*v] = y;
+                .count();
+            // Going against the flow is allowed, but only to save crossings
+            // or a lot of wire.
+            (crossed as f64 + wraps as f64 * 1.5) * 10_000. + against as f64 * AGAINST_FLOW + length
+        };
+        let mut layer_of = vec![usize::MAX; n];
+        let relabel = |layers: &mut Vec<Vec<usize>>, layer_of: &mut Vec<usize>| {
+            layers.retain(|l| !l.is_empty());
+            for (r, l) in layers.iter().enumerate() {
+                for v in l {
+                    layer_of[*v] = r;
+                }
+            }
+        };
+        relabel(&mut layers, &mut layer_of);
+        // Untangle by trial: swap neighbours in a column, or move a thing to
+        // the other side of the column it connects to; keep what crosses less.
+        let mut best = tangle(&layers, &layer_of, &align(&layers, &layer_of));
+        let mut budget = 2500usize;
+        loop {
+            let mut improved = false;
+            for r in 0..layers.len() {
+                for k in 0..layers[r].len().saturating_sub(1) {
+                    if budget == 0 {
+                        break;
+                    }
+                    budget -= 1;
+                    layers[r].swap(k, k + 1);
+                    let score = tangle(&layers, &layer_of, &align(&layers, &layer_of));
+                    if score < best - 1e-6 {
+                        best = score;
+                        improved = true;
+                    } else {
+                        layers[r].swap(k, k + 1);
+                    }
+                }
+            }
+            // Move a thing to another column (or a new one at either end),
+            // at its neighbours' height: e.g. a second feeder of a column to
+            // that column's far side, so the two fans don't cross.
+            for v in members.clone() {
+                let here = layer_of[v];
+                let columns = layers.len();
+                for target in -1..=columns as i64 {
+                    if budget == 0 || target == here as i64 {
+                        continue;
+                    }
+                    // A thing alone in its column can't open a new one.
+                    if (target < 0 || target == columns as i64) && layers[here].len() == 1 {
+                        continue;
+                    }
+                    budget -= 1;
+                    let saved = (layers.clone(), layer_of.clone());
+                    let tops = align(&saved.0, &saved.1);
+                    layers[here].retain(|u| *u != v);
+                    let at = if target < 0 {
+                        layers.insert(0, Vec::new());
+                        0
+                    } else if target as usize >= layers.len() {
+                        layers.push(Vec::new());
+                        layers.len() - 1
+                    } else {
+                        target as usize
+                    };
+                    let want = adj[v].iter().map(|(w, _, _)| tops[*w]).sum::<f64>()
+                        / adj[v].len().max(1) as f64;
+                    let pos = layers[at].iter().filter(|u| tops[**u] < want).count();
+                    layers[at].insert(pos, v);
+                    relabel(&mut layers, &mut layer_of);
+                    let score = tangle(&layers, &layer_of, &align(&layers, &layer_of));
+                    if score < best - 1e-6 {
+                        best = score;
+                        improved = true;
+                        break;
+                    }
+                    (layers, layer_of) = saved;
+                }
+            }
+            if !improved || budget == 0 {
+                break;
             }
         }
+        let top = align(&layers, &layer_of);
         let lowest = members
             .iter()
             .map(|v| top[*v])
@@ -523,9 +680,10 @@ fn arrange(
             for v in layer {
                 positions.insert(
                     ids[*v].clone(),
+                    // Whole pixels: wires and pins line up exactly.
                     Point {
-                        x,
-                        y: y + top[*v] - lowest,
+                        x: x.round(),
+                        y: (y + top[*v] - lowest).round(),
                     },
                 );
             }
@@ -535,7 +693,7 @@ fn arrange(
                 .map(|v| {
                     neighbours[*v]
                         .iter()
-                        .filter(|w| rank[**w] > rank[*v])
+                        .filter(|w| layer_of[**w] > layer_of[*v])
                         .count()
                 })
                 .sum::<usize>();
@@ -565,6 +723,8 @@ fn arrange(
     positions
 }
 
+/// What running a feed against the flow costs, in pixels of wire.
+const AGAINST_FLOW: f64 = 500.;
 /// Tops for a column, in order, each at least its height plus `gap` below
 /// the one above, as close as possible (least squares) to `desired`: pool
 /// adjacent violators over the tops less their minimum offsets.
@@ -720,7 +880,7 @@ struct Grid {
 }
 fn coords(mut v: Vec<f64>) -> Vec<f64> {
     v.sort_by(f64::total_cmp);
-    v.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    v.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
     let mut out = Vec::with_capacity(v.len() * 2);
     for (k, c) in v.iter().enumerate() {
         out.push(*c);
@@ -801,8 +961,8 @@ impl Grid {
         self.xs.len()
     }
     fn find(&self, p: Point) -> Option<usize> {
-        let i = self.xs.iter().position(|x| (x - p.x).abs() < 0.5)?;
-        let j = self.ys.iter().position(|y| (y - p.y).abs() < 0.5)?;
+        let i = self.xs.iter().position(|x| (x - p.x).abs() < 1e-3)?;
+        let j = self.ys.iter().position(|y| (y - p.y).abs() < 1e-3)?;
         Some(j * self.nx() + i)
     }
     fn point(&self, k: usize) -> Point {
@@ -1496,6 +1656,54 @@ fn spread(lines: &mut [Line], nodes: &[Node]) {
                 })
                 .collect();
             keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            // Then settle the order exactly: two neighbouring tracks swap if
+            // that crosses less where they turn off. A track turning towards
+            // the other's side, within the other's span, crosses it.
+            let ends = |rs: &[Run]| -> Vec<(f64, f64)> {
+                let mut out = Vec::new();
+                for r in rs {
+                    let pts = &lines[r.line].points;
+                    for (end, neighbour) in [(r.k, r.k.checked_sub(1)), (r.k + 1, Some(r.k + 2))] {
+                        let Some(nb) = neighbour.filter(|nb| *nb < pts.len()) else {
+                            continue;
+                        };
+                        let (along, off) = if horizontal {
+                            (pts[end].x, pts[nb].y - pts[end].y)
+                        } else {
+                            (pts[end].y, pts[nb].x - pts[end].x)
+                        };
+                        if off.abs() > 1e-6 {
+                            out.push((along, off.signum()));
+                        }
+                    }
+                }
+                out
+            };
+            let inside =
+                |rs: &[Run], at: f64| rs.iter().any(|r| at > r.lo + 1e-6 && at < r.hi - 1e-6);
+            // Crossings with `a` on the low side of `b`.
+            let cross = |a: &[Run], b: &[Run]| -> usize {
+                ends(a)
+                    .iter()
+                    .filter(|(at, d)| *d > 0. && inside(b, *at))
+                    .count()
+                    + ends(b)
+                        .iter()
+                        .filter(|(at, d)| *d < 0. && inside(a, *at))
+                        .count()
+            };
+            for _ in 0..keyed.len() * keyed.len() {
+                let mut swapped = false;
+                for k in 0..keyed.len().saturating_sub(1) {
+                    if cross(&keyed[k + 1].2, &keyed[k].2) < cross(&keyed[k].2, &keyed[k + 1].2) {
+                        keyed.swap(k, k + 1);
+                        swapped = true;
+                    }
+                }
+                if !swapped {
+                    break;
+                }
+            }
             let count = keyed.len();
             let mut spacing = TRACK_SPACING;
             if room_lo.is_finite() && room_hi.is_finite() {
@@ -1985,6 +2193,44 @@ mod tests {
         assert!(bends <= 2, "no wraparounds: {bends} bends");
     }
 
+    /// Proper crossings between different bundles' wires (not touching
+    /// ends or shared trunks).
+    pub(crate) fn crossings(l: &Layout) -> usize {
+        let mut segs: Vec<(usize, Point, Point)> = Vec::new();
+        for (bi, b) in l.bundles.iter().enumerate() {
+            for br in &b.branches {
+                for w in br.points.windows(2) {
+                    segs.push((bi, w[0], w[1]));
+                }
+            }
+        }
+        let mut n = 0;
+        for (i, (b1, a1, a2)) in segs.iter().enumerate() {
+            for (b2, c1, c2) in &segs[i + 1..] {
+                if b1 == b2 {
+                    continue;
+                }
+                let h1 = (a1.y - a2.y).abs() < 1e-6;
+                let h2 = (c1.y - c2.y).abs() < 1e-6;
+                if h1 == h2 {
+                    continue;
+                }
+                let (h, v) = if h1 {
+                    ((a1, a2), (c1, c2))
+                } else {
+                    ((c1, c2), (a1, a2))
+                };
+                let (x0, x1) = (h.0.x.min(h.1.x), h.0.x.max(h.1.x));
+                let (y0, y1) = (v.0.y.min(v.1.y), v.0.y.max(v.1.y));
+                if v.0.x > x0 + 1e-6 && v.0.x < x1 - 1e-6 && h.0.y > y0 + 1e-6 && h.0.y < y1 - 1e-6
+                {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     /// `REAL_DOC=path cargo test -p stufftracker-core real_document -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -2011,8 +2257,66 @@ mod tests {
         .unwrap();
         let second = t.elapsed();
         let (bends, shared, length) = check(&again);
+        let crossed = crossings(&again);
+        if let Ok(path) = std::env::var("DUMP_LAYOUT") {
+            std::fs::write(path, serde_json::to_string(&again).unwrap()).unwrap();
+        }
+        if std::env::var("SHOW_CROSSINGS").is_ok() {
+            let name = |id: &str| {
+                doc.entities
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map_or(id.to_string(), |e| e.name.chars().take(28).collect())
+            };
+            let mut segs: Vec<(usize, usize, Point, Point)> = Vec::new();
+            for (bi, b) in again.bundles.iter().enumerate() {
+                for (ri, br) in b.branches.iter().enumerate() {
+                    for w in br.points.windows(2) {
+                        segs.push((bi, ri, w[0], w[1]));
+                    }
+                }
+            }
+            for (i, (b1, r1, a1, a2)) in segs.iter().enumerate() {
+                for (b2, r2, c1, c2) in &segs[i + 1..] {
+                    if b1 == b2 {
+                        continue;
+                    }
+                    let h1 = (a1.y - a2.y).abs() < 1e-6;
+                    let h2 = (c1.y - c2.y).abs() < 1e-6;
+                    if h1 == h2 {
+                        continue;
+                    }
+                    let (h, v) = if h1 {
+                        ((a1, a2), (c1, c2))
+                    } else {
+                        ((c1, c2), (a1, a2))
+                    };
+                    let (x0, x1) = (h.0.x.min(h.1.x), h.0.x.max(h.1.x));
+                    let (y0, y1) = (v.0.y.min(v.1.y), v.0.y.max(v.1.y));
+                    if v.0.x > x0 + 1e-6
+                        && v.0.x < x1 - 1e-6
+                        && h.0.y > y0 + 1e-6
+                        && h.0.y < y1 - 1e-6
+                    {
+                        let e = |b: usize, r: usize| {
+                            let bb = &again.bundles[b];
+                            let ends: Vec<String> =
+                                bb.branches.iter().map(|x| name(&x.entity)).collect();
+                            format!("{}[{}]", ends.join(" ~ "), name(&bb.branches[r].entity))
+                        };
+                        println!(
+                            "X at ({:.0},{:.0}): {}  ×  {}",
+                            v.0.x,
+                            h.0.y,
+                            e(*b1, *r1),
+                            e(*b2, *r2)
+                        );
+                    }
+                }
+            }
+        }
         println!(
-            "flat: {} nodes, {} bundles, {} unrouted, {bends} bends, {shared} shared runs, length {length:.0}; layout {first:?}, relayout {second:?}",
+            "flat: {} nodes, {} bundles, {} unrouted, {bends} bends, {crossed} crossings, {shared} shared runs, length {length:.0}; layout {first:?}, relayout {second:?}",
             again.nodes.len(),
             again.bundles.len(),
             again.unrouted_connections.len(),

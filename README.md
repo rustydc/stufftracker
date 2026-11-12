@@ -109,8 +109,13 @@ automation. Subsequent boots preserve your data.
   run straight. A wire leaving a panel's left-column breaker
   sends what it feeds to the panel's left (and everything downstream keeps
   going left), so a panel feeds out to both its sides as it does on the
-  wall. **⟲ Re-arrange** lays the current diagram (or focus) out again this
-  way, after dragging. In a panel faceplate, runs of two or more wholly
+  wall. Then a quick search untangles it: swapping neighbours in a
+  column and moving a card to another column (say, a second feeder to the
+  far side of what it feeds), keeping each move that crosses less, scored
+  by the straight lines between where wires land, with a charge for a port
+  wire that would have to wrap around its card and a smaller one for
+  running against the flow. **⟲ Re-arrange** lays the current diagram (or
+  focus) out again this way, after dragging. In a panel faceplate, runs of two or more wholly
   empty rows fold into one dashed "⋯ spaces 23–36 empty ⋯" strip (the
   schedule still lists every space). Wires are routed by a cost search over a sparse grid around the
   cards (length, bends, crossings, running alongside other wires), leaving
