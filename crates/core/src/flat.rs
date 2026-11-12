@@ -127,7 +127,17 @@ pub(crate) fn projection(doc: &Document, view: &View) -> (Document, View) {
     if !missing.is_empty() {
         let areas: BTreeMap<String, String> =
             missing.iter().map(|id| (id.clone(), area_of(id))).collect();
-        let placed = arrange(&projected, &missing, &positions, &sizes, &areas);
+        // Where a wire meets a faceplate: its port's row (or the
+        // unassigned row); other things meet wires at their middle.
+        let attach = |id: &str, port: Option<&str>| -> Option<f64> {
+            let (_, f) = faces.get(id)?;
+            let b = match port {
+                Some(p) => f.ports.iter().find(|b| b.id == p && b.segment == 0),
+                None => f.unassigned.as_ref(),
+            }?;
+            Some(b.y + b.height / 2.)
+        };
+        let placed = arrange(&projected, &missing, &positions, &sizes, &areas, &attach);
         positions.extend(placed);
     }
     flat_view.positions = positions;
@@ -146,6 +156,7 @@ fn arrange(
     placed: &BTreeMap<String, Point>,
     sizes: &BTreeMap<String, Size>,
     areas: &BTreeMap<String, String>,
+    attach: &dyn Fn(&str, Option<&str>) -> Option<f64>,
 ) -> BTreeMap<String, Point> {
     let index: BTreeMap<&str, usize> = ids
         .iter()
@@ -155,12 +166,21 @@ fn arrange(
     let n = ids.len();
     let mut out_edges: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
     let mut neighbours: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    // Per thing: (neighbour, where the wire meets this thing, where it meets
+    // the neighbour), as offsets from each top (a faceplate port's row).
+    let mut adj: Vec<Vec<(usize, Option<f64>, Option<f64>)>> = vec![Vec::new(); n];
     for c in &doc.connections {
         let at: Vec<(usize, &Role)> = c
             .endpoints
             .iter()
             .filter_map(|ep| index.get(ep.entity.as_str()).map(|i| (*i, &ep.role)))
             .collect();
+        let port_of = |i: usize| {
+            c.endpoints
+                .iter()
+                .find(|ep| ep.entity == ids[i])
+                .and_then(|ep| attach(&ids[i], ep.port.as_deref()))
+        };
         let sources: Vec<usize> = at
             .iter()
             .filter(|(_, r)| **r == Role::Source)
@@ -188,6 +208,8 @@ fn arrange(
                 out_edges[a].insert(b);
                 neighbours[a].insert(b);
                 neighbours[b].insert(a);
+                adj[a].push((b, port_of(a), port_of(b)));
+                adj[b].push((a, port_of(b), port_of(a)));
             }
         }
     }
@@ -309,6 +331,13 @@ fn arrange(
         for v in sorted {
             layers[rank[v] - base].push(v);
         }
+        let offset = |v: usize, off: Option<f64>| off.unwrap_or(size(v).height / 2.);
+        // Where along a neighbour a wire meets it, as a fraction of a slot:
+        // a panel's breakers order the things they feed.
+        let frac = |w: usize, off: Option<f64>| {
+            (offset(w, off) / size(w).height).clamp(0., 1.) * 0.8 - 0.4
+        };
+        let in_layer = |w: usize, r: usize| group[w] == group[members[0]] && rank[w] - base == r;
         // Barycentre sweeps: each column ordered by where its neighbours sit.
         let mut slot = vec![0f64; n];
         let reslot = |layers: &Vec<Vec<usize>>, slot: &mut Vec<f64>| {
@@ -330,10 +359,10 @@ fn arrange(
                 let mut keyed: Vec<(f64, usize)> = layers[r]
                     .iter()
                     .map(|v| {
-                        let ns: Vec<f64> = neighbours[*v]
+                        let ns: Vec<f64> = adj[*v]
                             .iter()
-                            .filter(|w| group[**w] == group[*v] && rank[**w] - base == near)
-                            .map(|w| slot[*w])
+                            .filter(|(w, _, _)| in_layer(*w, near))
+                            .map(|(w, _, wo)| slot[*w] + frac(*w, *wo))
                             .collect();
                         let key = if ns.is_empty() {
                             slot[*v]
@@ -348,6 +377,44 @@ fn arrange(
                 reslot(&layers, &mut slot);
             }
         }
+        // Then swap neighbours in a column while that removes crossings
+        // with the columns either side.
+        let crossings = |u: usize, v: usize, r: usize, slot: &Vec<f64>| -> usize {
+            let mut count = 0;
+            for near in [r.wrapping_sub(1), r + 1] {
+                if near >= depth {
+                    continue;
+                }
+                for (a, _, ao) in adj[u].iter().filter(|(w, _, _)| in_layer(*w, near)) {
+                    for (b, _, bo) in adj[v].iter().filter(|(w, _, _)| in_layer(*w, near)) {
+                        if slot[*a] + frac(*a, *ao) > slot[*b] + frac(*b, *bo) + 1e-9 {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            count
+        };
+        for _ in 0..20 {
+            let mut improved = false;
+            for r in 0..depth {
+                for k in 0..layers[r].len().saturating_sub(1) {
+                    let (u, v) = (layers[r][k], layers[r][k + 1]);
+                    if crossings(v, u, r, &slot) < crossings(u, v, r, &slot) {
+                        layers[r].swap(k, k + 1);
+                        slot[u] = (k + 1) as f64;
+                        slot[v] = k as f64;
+                        improved = true;
+                    }
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        // Heights: start stacked and centred, then line each thing up with
+        // the median of where its wires meet its neighbours, keeping each
+        // column's order and spacing (an exact least-squares fit).
         let heights: Vec<f64> = layers
             .iter()
             .map(|l| {
@@ -356,13 +423,81 @@ fn arrange(
             })
             .collect();
         let tallest = heights.iter().copied().fold(0., f64::max);
-        let mut x = origin_x;
+        let mut top = vec![0f64; n];
         for (r, layer) in layers.iter().enumerate() {
-            let mut ly = y + (tallest - heights[r]) / 2.;
+            let mut ly = (tallest - heights[r]) / 2.;
+            for v in layer {
+                top[*v] = ly;
+                ly += size(*v).height + ROW_GAP;
+            }
+        }
+        let passes: Vec<(usize, Vec<usize>)> = {
+            let mut p = Vec::new();
+            for it in 0..6 {
+                for r in 1..depth {
+                    p.push((r, vec![r - 1]));
+                }
+                for r in (0..depth.saturating_sub(1)).rev() {
+                    p.push((r, vec![r + 1]));
+                }
+                if it >= 4 {
+                    for r in 0..depth {
+                        p.push((r, vec![r.wrapping_sub(1), r + 1]));
+                    }
+                }
+            }
+            p
+        };
+        for (r, nears) in passes {
+            let layer = &layers[r];
+            let desired: Vec<f64> = layer
+                .iter()
+                .map(|v| {
+                    let mut at: Vec<f64> = adj[*v]
+                        .iter()
+                        .filter(|(w, _, _)| {
+                            nears
+                                .iter()
+                                .any(|near| *near < depth && in_layer(*w, *near))
+                        })
+                        .map(|(w, own, wo)| top[*w] + offset(*w, *wo) - offset(*v, *own))
+                        .collect();
+                    if at.is_empty() {
+                        return top[*v];
+                    }
+                    at.sort_by(f64::total_cmp);
+                    let m = at.len() / 2;
+                    if at.len() % 2 == 1 {
+                        at[m]
+                    } else {
+                        (at[m - 1] + at[m]) / 2.
+                    }
+                })
+                .collect();
+            let hs: Vec<f64> = layer.iter().map(|v| size(*v).height).collect();
+            for (v, y) in layer.iter().zip(fit_in_order(&desired, &hs, ROW_GAP)) {
+                top[*v] = y;
+            }
+        }
+        let lowest = members
+            .iter()
+            .map(|v| top[*v])
+            .fold(f64::INFINITY, f64::min);
+        let deepest = members
+            .iter()
+            .map(|v| top[*v] + size(*v).height)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let mut x = origin_x;
+        for layer in &layers {
             let width = layer.iter().map(|v| size(*v).width).fold(0., f64::max);
             for v in layer {
-                positions.insert(ids[*v].clone(), Point { x, y: ly });
-                ly += size(*v).height + ROW_GAP;
+                positions.insert(
+                    ids[*v].clone(),
+                    Point {
+                        x,
+                        y: y + top[*v] - lowest,
+                    },
+                );
             }
             // Wider gaps where more wires cross between the columns.
             let crossing = layer
@@ -376,6 +511,7 @@ fn arrange(
                 .sum::<usize>();
             x += width + COLUMN_GAP + (crossing as f64 * 6.).min(160.);
         }
+        let tallest = deepest - lowest;
         widest = widest.max(x - origin_x);
         y += tallest + 110.;
     }
@@ -397,6 +533,37 @@ fn arrange(
         row_height = row_height.max(s.height);
     }
     positions
+}
+
+/// Tops for a column, in order, each at least its height plus `gap` below
+/// the one above, as close as possible (least squares) to `desired`: pool
+/// adjacent violators over the tops less their minimum offsets.
+fn fit_in_order(desired: &[f64], heights: &[f64], gap: f64) -> Vec<f64> {
+    let mut offset = vec![0.; desired.len()];
+    for i in 1..desired.len() {
+        offset[i] = offset[i - 1] + heights[i - 1] + gap;
+    }
+    let mut blocks: Vec<(f64, usize)> = Vec::new();
+    for (d, o) in desired.iter().zip(&offset) {
+        blocks.push((d - o, 1));
+        while blocks.len() > 1 {
+            let (s2, c2) = blocks[blocks.len() - 1];
+            let (s1, c1) = blocks[blocks.len() - 2];
+            if s1 / c1 as f64 > s2 / c2 as f64 {
+                blocks.pop();
+                *blocks.last_mut().unwrap() = (s1 + s2, c1 + c2);
+            } else {
+                break;
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(desired.len());
+    for (sum, count) in blocks {
+        for _ in 0..count {
+            out.push(sum / count as f64 + offset[out.len()]);
+        }
+    }
+    out
 }
 
 // --- Routing ---------------------------------------------------------------
@@ -1574,6 +1741,124 @@ mod tests {
         .unwrap();
         assert_eq!(moved.flat_positions[&id], Point { x: 2000., y: 2000. });
         assert_eq!(moved.positions, view.positions);
+    }
+
+    #[test]
+    fn columns_fit_their_tops_in_order() {
+        // Free to sit where wanted.
+        assert_eq!(fit_in_order(&[0., 200.], &[50., 50.], 10.), vec![0., 200.]);
+        // Wanting the same spot: split the difference, keep the spacing.
+        assert_eq!(
+            fit_in_order(&[100., 100.], &[50., 50.], 10.),
+            vec![70., 130.]
+        );
+    }
+
+    fn chain(n: usize) -> Document {
+        let mut doc = sample();
+        let ids: Vec<String> = doc
+            .entities
+            .iter()
+            .filter(|e| e.kind != "space")
+            .take(n)
+            .map(|e| e.id.clone())
+            .collect();
+        let layer = doc.layers[0].id.clone();
+        doc.connections = ids
+            .windows(2)
+            .enumerate()
+            .map(|(k, w)| Connection {
+                id: format!("c{k}"),
+                name: format!("c{k}"),
+                layer: layer.clone(),
+                endpoints: vec![
+                    Endpoint {
+                        entity: w[0].clone(),
+                        role: Role::Source,
+                        port: None,
+                    },
+                    Endpoint {
+                        entity: w[1].clone(),
+                        role: Role::Target,
+                        port: None,
+                    },
+                ],
+                properties: Vec::new(),
+            })
+            .collect();
+        doc
+    }
+
+    #[test]
+    fn a_chain_lines_up_straight() {
+        let doc = chain(4);
+        let l = layout(&LayoutRequest {
+            document: doc.clone(),
+            view: flat_view(),
+        })
+        .unwrap();
+        let y = |id: &str| l.nodes.iter().find(|n| n.id == id).unwrap().position.y;
+        let chained: Vec<&str> = doc
+            .connections
+            .iter()
+            .flat_map(|c| c.endpoints.iter().map(|e| e.entity.as_str()))
+            .collect();
+        for id in &chained {
+            assert_eq!(y(id), y(chained[0]), "{id} is level with the chain");
+        }
+        let (bends, _, _) = check(&l);
+        assert_eq!(bends, 0, "straight wires");
+    }
+
+    #[test]
+    fn a_fan_out_does_not_cross_itself() {
+        // One source feeding four, which each feed one more: the second
+        // column's order follows the first, so no wire crosses another.
+        let mut doc = sample();
+        let ids: Vec<String> = doc
+            .entities
+            .iter()
+            .filter(|e| e.kind != "space")
+            .take(9)
+            .map(|e| e.id.clone())
+            .collect();
+        let layer = doc.layers[0].id.clone();
+        let edge = |k: usize, a: &str, b: &str| Connection {
+            id: format!("e{k}"),
+            name: format!("e{k}"),
+            layer: layer.clone(),
+            endpoints: vec![
+                Endpoint {
+                    entity: a.into(),
+                    role: Role::Source,
+                    port: None,
+                },
+                Endpoint {
+                    entity: b.into(),
+                    role: Role::Target,
+                    port: None,
+                },
+            ],
+            properties: Vec::new(),
+        };
+        let mut cs = Vec::new();
+        for k in 0..4 {
+            cs.push(edge(k, &ids[0], &ids[1 + k]));
+            // Feed the next column in reverse name order, to give it work.
+            cs.push(edge(10 + k, &ids[1 + k], &ids[8 - k]));
+        }
+        doc.connections = cs;
+        let l = layout(&LayoutRequest {
+            document: doc,
+            view: flat_view(),
+        })
+        .unwrap();
+        let y = |id: &str| l.nodes.iter().find(|n| n.id == id).unwrap().position.y;
+        for k in 0..3 {
+            let (a, b) = (y(&ids[1 + k]), y(&ids[2 + k]));
+            let (c, d) = (y(&ids[8 - k]), y(&ids[7 - k]));
+            assert_eq!(a < b, c < d, "column orders agree");
+        }
     }
 
     /// `REAL_DOC=path cargo test -p stufftracker-core real_document -- --ignored --nocapture`

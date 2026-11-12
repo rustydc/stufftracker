@@ -1767,6 +1767,7 @@ label.toggle {
   margin-right: 4px;
   white-space: nowrap;
 }
+.list-mode #rearrange,
 .list-mode .areas-toggle {
   display: none;
 }

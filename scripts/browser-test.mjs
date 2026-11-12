@@ -58,8 +58,29 @@ try {
     }),
   );
   assert.ok(!diagonal, "orthogonal routes");
+  // Re-arrange puts a dragged card back where the connections place it.
+  {
+    const at = () =>
+      page.locator('.node[data-id="lamp"]').getAttribute("transform");
+    const home = await at();
+    const box = await page.locator('.node[data-id="lamp"]').boundingBox();
+    await page.mouse.move(box.x + 30, box.y + 20);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 160, box.y + 140, { steps: 5 });
+    await page.mouse.up();
+    await page.waitForFunction(
+      () => !("layoutPending" in document.querySelector("#graph").dataset),
+    );
+    assert.notEqual(await at(), home, "dragged");
+    await page.locator("#rearrange").click();
+    assert.equal(await at(), home, "re-arranged back");
+  }
   // The rest of these checks are about nested spaces: turn areas on.
   await page.locator("#areas").check();
+  assert.ok(
+    await page.locator("#rearrange").isHidden(),
+    "nested keeps its own",
+  );
   assert.equal(await page.locator(".node").count(), 17);
   const transforms = async () =>
     page

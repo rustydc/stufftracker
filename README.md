@@ -101,8 +101,13 @@ automation. Subsequent boots preserve your data.
 - **Flat diagrams, areas optional.** Diagrams are flat by default: every
   thing is its own card, and a space appears only where a connection ends on
   it. Things are arranged by flow (what feeds on the left, what it feeds to
-  the right, ordered to cut crossings; unconnected things in a grid below,
-  by area). Wires are routed by a cost search over a sparse grid around the
+  the right; unconnected things in a grid below, by area). Columns are
+  ordered by where each thing's neighbours sit (a faceplate's port order
+  counts, so a panel's breakers fan out in order), then neighbours swap
+  while that removes crossings; each thing then lines up with the median of
+  the things it connects to, at the port row where the wire lands, so chains
+  run straight. **⟲ Re-arrange** lays the current diagram (or focus) out
+  again this way, after dragging. Wires are routed by a cost search over a sparse grid around the
   cards (length, bends, crossings, running alongside other wires), leaving
   by whichever side, top and bottom included, suits where they go; each
   wire is then rerouted once knowing where the others went, and parallel

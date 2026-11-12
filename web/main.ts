@@ -1029,6 +1029,8 @@ function render() {
     return;
   }
   $<HTMLInputElement>("areas").checked = !!view.areas;
+  // Re-arranging is the flat layout's: nested spaces keep theirs.
+  $("rearrange").hidden = !!view.areas;
   layoutGeneration++;
   delete svg.dataset.layoutPending;
   computeLayout();
@@ -3095,4 +3097,12 @@ $<HTMLInputElement>("areas").onchange = () => {
   else delete view.areas;
   render();
   fit();
+};
+// Lay the current diagram (or focus) out afresh by its connections.
+$("rearrange").onclick = () => {
+  if (view.focus) view.focus.positions = {};
+  else view.flat_positions = {};
+  render();
+  fit();
+  status("Re-arranged by connections");
 };
