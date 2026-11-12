@@ -455,12 +455,42 @@ async fn live_json(
         None => serde_json::json!({ "connected": false }),
     })
 }
+/// The viewer: one self-contained page. Browsers (and an app shell kept
+/// open) must check for a new build on every load, so it is `no-cache` with
+/// an ETag of the build; an unchanged page costs a 304, not 1.3 MB.
+const VIEWER: &str = include_str!("../../../dist/index.html");
+fn viewer_etag() -> &'static str {
+    static TAG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TAG.get_or_init(|| {
+        use sha2::Digest;
+        let d = sha2::Sha256::digest(VIEWER.as_bytes());
+        format!(
+            "\"{}\"",
+            d[..12]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        )
+    })
+}
+async fn viewer(headers: HeaderMap) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let tag = viewer_etag();
+    let fresh = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == tag));
+    let cache = [(header::CACHE_CONTROL, "no-cache"), (header::ETAG, tag)];
+    if fresh {
+        (StatusCode::NOT_MODIFIED, cache).into_response()
+    } else {
+        (cache, Html(VIEWER)).into_response()
+    }
+}
 fn router(a: App) -> Router {
     Router::new()
-        .route(
-            "/",
-            get(|| async { Html(include_str!("../../../dist/index.html")) }),
-        )
+        .route("/", get(viewer))
         .route("/api/document", get(document).put(put_document))
         .route("/api/views", get(views).post(save_view))
         .route("/api/views/{id}", axum::routing::delete(delete_view))

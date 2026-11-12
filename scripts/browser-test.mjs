@@ -24,6 +24,15 @@ try {
   for (const v of await (await page.request.get(`${base}api/views`)).json())
     if (v.name === "Browser test perspective")
       await page.request.delete(`${base}api/views/${v.id}`);
+  // The page is always revalidated, so a new build shows on the next load.
+  const first = await page.request.get(base);
+  assert.equal(first.headers()["cache-control"], "no-cache");
+  const etag = first.headers()["etag"];
+  assert.ok(etag, "the viewer has an ETag");
+  const again = await page.request.get(base, {
+    headers: { "If-None-Match": etag },
+  });
+  assert.equal(again.status(), 304);
   await page.goto(base + "#everything");
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
