@@ -128,8 +128,14 @@ try {
     ["router"],
   );
   assert.ok(!(await page.locator("#list").isVisible()));
+  // The bar always has a way back; Keep/Add appear only once it shows
+  // something besides the checks (here, after widening the hops).
+  assert.equal(await page.locator("#trace-back").textContent(), "☰ List");
+  assert.equal(await page.locator("#trace-keep").count(), 0);
+  await page.locator('#focus-bar [data-hops="1"]').click();
+  await page.waitForSelector("#trace-keep");
   // Back to the list: checks and query are still there.
-  await page.locator("#to-list").click();
+  await page.locator("#trace-back").click();
   assert.ok(await page.locator("#list").isVisible());
   assert.match(await count(), / · 1 checked/);
   assert.equal(
@@ -142,7 +148,7 @@ try {
   await query("router");
   await page.locator('[data-row="router"] .list-name').click();
   await page.locator('#inspector [data-focus="upstream"]').click();
-  await page.waitForSelector("#trace-keep");
+  await page.waitForSelector("#trace-back");
   await page.locator("#trace-back").click();
   assert.ok(await page.locator("#list").isVisible());
   assert.match(await count(), / · 1 checked/);
@@ -165,9 +171,12 @@ try {
   await page.locator("#to-list").click();
   assert.match(await count(), new RegExp(` · ${traced.length} checked`));
   // From a diagram: a trace, then Keep replaces the checks with its things.
+  await page.locator('[data-list="clear"]').click();
+  await query("router");
+  await page.locator('[data-check="router"]').check();
   await page.locator('[data-list="diagram"]').click();
   await page.locator('.node[data-id="router"]').first().click();
-  await page.locator('#inspector [data-focus="upstream"]').click();
+  await page.locator('#inspector [data-focus="both"]').click();
   await page.waitForSelector("#trace-keep");
   const up = await page
     .locator(".node")

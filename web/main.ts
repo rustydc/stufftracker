@@ -208,15 +208,16 @@ function shownThings() {
 }
 function closeTrace(how: "keep" | "add" | "back") {
   if (how === "back") {
-    const b = before;
+    // Nothing to go back to (a diagram of the checks): the list.
+    const b = before ?? { mode: "list" as const };
     traceOpen = false;
     before = null;
-    if (b?.mode === "list") {
+    if (b.mode === "list") {
       if (b.focus) view.focus = b.focus;
       else delete view.focus;
       mode = "list";
       render();
-    } else setFocus(b?.focus || null);
+    } else setFocus(b.focus || null);
     return;
   }
   const shown = shownThings();
@@ -937,11 +938,17 @@ function renderBars() {
           : dir === "downstream"
             ? "What is fed by"
             : "Around";
-    bar.innerHTML = `<span class="focus-label">${lead} <b>${esc(what)}</b> · ${current.nodes.filter((n) => !n.container || n.collapsed).length} shown</span><span class="seg" role="group" aria-label="Direction">${(["both", "upstream", "downstream"] as const).map((d) => `<button data-dir="${d}" class="${d === dir ? "on" : ""}">${{ both: "↔ Both", upstream: "↑ Feeds", downstream: "↓ Fed" }[d]}</button>`).join("")}</span><span class="seg" role="group" aria-label="Hops">${(["0", "1", "2", "3", "all"] as const).map((h) => `<button data-hops="${h}" class="${String(f.hops ?? "all") === h ? "on" : ""}" title="${h === "0" ? "Only these things" : h === "all" ? "Everything connected" : `${h} connection${h === "1" ? "" : "s"} away`}">${h === "0" ? "Only" : h === "all" ? "All" : h}</button>`).join("")}</span>${
-      traceOpen
-        ? `<span class="trace-exits" role="group" aria-label="Close"><button id="trace-keep" class="primary" title="Check just these and show only them">✓ Keep these</button><button id="trace-add" title="Add these to what's checked, and show them all">＋ Add<span class="long"> to checked</span>${checked.size ? ` (${checked.size})` : ""}</button><button id="trace-back" title="Back to what you were looking at">↩ Back</button></span>`
-        : ""
-    }`;
+    // Every focus has a way back (to the list, if nothing else); Keep and
+    // Add only when it shows something other than what's checked.
+    const shown = shownThings();
+    const same =
+      shown.length === checked.size && shown.every((id) => checked.has(id));
+    const toList = (before?.mode ?? "list") === "list";
+    bar.innerHTML = `<span class="focus-label">${lead} <b>${esc(what)}</b> · ${current.nodes.filter((n) => !n.container || n.collapsed).length} shown</span><span class="seg" role="group" aria-label="Direction">${(["both", "upstream", "downstream"] as const).map((d) => `<button data-dir="${d}" class="${d === dir ? "on" : ""}">${{ both: "↔ Both", upstream: "↑ Feeds", downstream: "↓ Fed" }[d]}</button>`).join("")}</span><span class="seg" role="group" aria-label="Hops">${(["0", "1", "2", "3", "all"] as const).map((h) => `<button data-hops="${h}" class="${String(f.hops ?? "all") === h ? "on" : ""}" title="${h === "0" ? "Only these things" : h === "all" ? "Everything connected" : `${h} connection${h === "1" ? "" : "s"} away`}">${h === "0" ? "Only" : h === "all" ? "All" : h}</button>`).join("")}</span><span class="trace-exits" role="group" aria-label="Close">${
+      same
+        ? ""
+        : `<button id="trace-keep" class="primary" title="Check just these and show only them">✓ Keep these</button><button id="trace-add" title="Add these to what's checked, and show them all">＋ Add<span class="long"> to checked</span>${checked.size ? ` (${checked.size})` : ""}</button>`
+    }<button id="trace-back" title="${toList ? "Back to the list" : "Back to what you were looking at"}">${toList ? "☰ List" : "↩ Back"}</button></span>`;
     bar
       .querySelectorAll<HTMLButtonElement>("[data-dir]")
       .forEach(
@@ -964,11 +971,11 @@ function renderBars() {
             traceOpen,
           )),
     );
-    if (traceOpen) {
+    if (!same) {
       $("trace-keep").onclick = () => closeTrace("keep");
       $("trace-add").onclick = () => closeTrace("add");
-      $("trace-back").onclick = () => closeTrace("back");
     }
+    $("trace-back").onclick = () => closeTrace("back");
   }
   const pick = $("pick-bar");
   pick.hidden = !picked.size;

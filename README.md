@@ -94,7 +94,9 @@ automation. Subsequent boots preserve your data.
   a dialog over what you were looking at: **✓ Keep these** checks just what
   it shows and diagrams them, **＋ Add to checked** adds them to the checks
   and diagrams the lot, and **↩ Back** returns to where you were (the list
-  or the previous diagram). **Everything** draws the
+  or the previous diagram). A diagram of your checks has the same bar:
+  **☰ List** goes back, and Keep/Add appear once it shows more than the
+  checks (say, after widening the hops). **Everything** draws the
   whole inventory, and choosing a saved view opens it. A detail's key or ⧉
   button filters the list. Open `#everything` to start on the full diagram.
 - **Filters.** **Filter** (beside the saved views) shows only the things whose
