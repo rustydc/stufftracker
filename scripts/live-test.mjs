@@ -224,6 +224,7 @@ try {
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
   );
+  await page.locator("#areas").check();
   assert.equal(await page.locator(".node").count(), 17, "drawn before status");
   assert.equal(await page.locator(".ha-pill").count(), 0);
   release();

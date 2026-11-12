@@ -27,6 +27,8 @@ try {
       );
     await page.goto(url.includes("offline") ? url : url + "#everything");
     await page.waitForSelector(".node");
+    // These checks tap spaces: draw them (the offline sample already does).
+    if (!url.includes("offline")) await page.locator("#areas").check();
     const cdp = await context.newCDPSession(page);
     const frame = await page.locator("#graph").boundingBox();
     const x = frame.x + frame.width / 2,
@@ -107,6 +109,10 @@ try {
     // A tap opens the thing's bottom sheet; a drag does not.
     await page.locator("#fit").click();
     const tapOn = async (id) => {
+      // Let a pending routed layout land first: it redraws the scene.
+      await page.waitForFunction(
+        () => !("layoutPending" in document.querySelector("#graph").dataset),
+      );
       const b = await page.locator(`.node[data-id="${id}"]`).boundingBox();
       const p = [b.x + b.width / 2, b.y + Math.min(20, b.height / 2)];
       await touch("touchStart", [[1, ...p]]);

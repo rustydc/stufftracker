@@ -98,6 +98,19 @@ automation. Subsequent boots preserve your data.
   without the bar; **☰ List** in the toolbar goes back. **Everything** draws the
   whole inventory, and choosing a saved view opens it. A detail's key or ⧉
   button filters the list. Open `#everything` to start on the full diagram.
+- **Flat diagrams, areas optional.** Diagrams are flat by default: every
+  thing is its own card, and a space appears only where a connection ends on
+  it. Things are arranged by flow (what feeds on the left, what it feeds to
+  the right, ordered to cut crossings; unconnected things in a grid below,
+  by area). Wires are routed by a cost search over a sparse grid around the
+  cards (length, bends, crossings, running alongside other wires), leaving
+  by whichever side, top and bottom included, suits where they go; each
+  wire is then rerouted once knowing where the others went, and parallel
+  runs are spread apart and ordered so they don't cross where they part
+  (pins slide along a card's side to match). A faceplate's ports keep their
+  rows. **Areas** in the toolbar draws spaces as nested containers instead
+  (the older router, slower with a big inventory); the flat and nested
+  arrangements are kept separately in the view.
 - **Filters.** **Filter** (beside the saved views) shows only the things whose
   details match: pick a detail key (or Name, Kind, Any field), a test
   (contains, is, has, doesn't have) and a value, and combine conditions with

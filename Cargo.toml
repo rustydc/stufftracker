@@ -6,3 +6,9 @@ exclude = ["vendor/darude"]
 [patch.crates-io]
 capnp = { path = "vendor/darude/vendor/capnp" }
 capnp-rpc = { path = "vendor/darude/vendor/capnp-rpc" }
+
+# The viewer embeds the WASM in its page: keep it small (and fast).
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

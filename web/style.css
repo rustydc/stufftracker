@@ -1758,3 +1758,15 @@ label.toggle {
     font-size: 12px;
   }
 }
+.areas-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #4b5a49;
+  margin-right: 4px;
+  white-space: nowrap;
+}
+.list-mode .areas-toggle {
+  display: none;
+}

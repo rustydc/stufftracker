@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use wasm_bindgen::prelude::*;
+mod flat;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entity {
@@ -219,7 +220,7 @@ pub struct Point {
     pub x: f64,
     pub y: f64,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct View {
     /// Version 2 stores positions relative to the immediate parent.
     #[serde(default)]
@@ -238,6 +239,32 @@ pub struct View {
     /// Show only part of the graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<Focus>,
+    /// Draw spaces as containers with their contents inside. Off (the
+    /// default for a stored view) lays every thing out flat: often the
+    /// clearer diagram, since nesting fights the layout.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub areas: bool,
+    /// The flat arrangement (areas off), kept apart from `positions` so
+    /// switching back and forth loses neither.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub flat_positions: BTreeMap<String, Point>,
+}
+/// In code, a view defaults to areas on (the nested layout); a stored view
+/// without the field is flat.
+impl Default for View {
+    fn default() -> Self {
+        View {
+            layout_version: 0,
+            positions: BTreeMap::new(),
+            collapsed: BTreeSet::new(),
+            hidden_layers: BTreeSet::new(),
+            attachment_hints: BTreeMap::new(),
+            faceplates: BTreeSet::new(),
+            focus: None,
+            areas: true,
+            flat_positions: BTreeMap::new(),
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Focus {
@@ -464,6 +491,9 @@ pub struct Layout {
     /// the full view's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus_positions: Option<BTreeMap<String, Point>>,
+    /// For a flat view: its arrangement, to store as `view.flat_positions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flat_positions: Option<BTreeMap<String, Point>>,
 }
 
 pub fn validate(doc: &Document) -> Result<(), String> {
@@ -677,6 +707,7 @@ pub fn validate_view(view: &View) -> Result<(), String> {
         .values()
         .chain(view.attachment_hints.values())
         .chain(view.focus.iter().flat_map(|f| f.positions.values()))
+        .chain(view.flat_positions.values())
         .any(|p| !p.x.is_finite() || !p.y.is_finite() || p.x.abs() > 1e6 || p.y.abs() > 1e6)
     {
         return Err("Invalid coordinates".into());
@@ -1325,6 +1356,8 @@ fn focus_projection(doc: &Document, view: &View) -> Option<(Document, View)> {
             attachment_hints: BTreeMap::new(),
             faceplates: view.faceplates.clone(),
             focus: None,
+            areas: view.areas,
+            flat_positions: focus.positions.clone(),
         },
     ))
 }
@@ -1334,7 +1367,26 @@ fn focused(
 ) -> Option<Result<Layout, String>> {
     let (document, view) = focus_projection(&req.document, &req.view)?;
     Some(lay(&LayoutRequest { document, view }).map(|mut l| {
-        l.focus_positions = Some(std::mem::replace(
+        // A flat focus arranged itself in `flat_positions`.
+        let arranged = l.flat_positions.take();
+        let nested = std::mem::replace(&mut l.positions, req.view.positions.clone());
+        l.focus_positions = Some(arranged.unwrap_or(nested));
+        l.attachment_hints = req.view.attachment_hints.clone();
+        l
+    }))
+}
+/// Areas off: lay out the flat projection, reporting its arrangement as
+/// `flat_positions` and leaving the nested positions as they were.
+fn flattened(
+    req: &LayoutRequest,
+    lay: fn(&LayoutRequest, bool) -> Result<Layout, String>,
+) -> Option<Result<Layout, String>> {
+    if req.view.areas {
+        return None;
+    }
+    let (document, view) = flat::projection(&req.document, &req.view);
+    Some(lay(&LayoutRequest { document, view }, true).map(|mut l| {
+        l.flat_positions = Some(std::mem::replace(
             &mut l.positions,
             req.view.positions.clone(),
         ));
@@ -1348,11 +1400,35 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
     if let Some(result) = focused(req, layout) {
         return result;
     }
+    if let Some(result) = flattened(req, routed_layout) {
+        return result;
+    }
+    routed_layout(req, false)
+}
+fn routed_layout(req: &LayoutRequest, flat: bool) -> Result<Layout, String> {
     let doc = &req.document;
     let view = &req.view;
     let Placement {
         positions, nodes, ..
     } = place(doc, view);
+    if flat {
+        let bundles = flat::route(doc, view, &nodes);
+        let unrouted_connections = bundles
+            .iter()
+            .filter(|b| b.branches.iter().any(|branch| branch.points.is_empty()))
+            .flat_map(|b| b.connections.clone())
+            .collect();
+        return Ok(Layout {
+            attachment_hints: BTreeMap::new(),
+            layout_version: 2,
+            unrouted_connections,
+            nodes,
+            bundles,
+            positions,
+            focus_positions: None,
+            flat_positions: None,
+        });
+    }
     let groups = bundle_groups(doc, view);
     let mut attachment_hints = view.attachment_hints.clone();
     let mut reserved = Vec::new();
@@ -1480,6 +1556,7 @@ pub fn layout(req: &LayoutRequest) -> Result<Layout, String> {
         bundles,
         positions,
         focus_positions: None,
+        flat_positions: None,
     })
 }
 
@@ -3007,7 +3084,25 @@ pub fn move_entity(req: &MoveRequest) -> Result<View, String> {
             dragging: req.dragging,
         })?;
         let mut out = req.view.clone();
-        out.focus.as_mut().unwrap().positions = moved.positions;
+        out.focus.as_mut().unwrap().positions = if req.view.areas {
+            moved.positions
+        } else {
+            moved.flat_positions
+        };
+        return Ok(out);
+    }
+    // Areas off: move within the flat arrangement.
+    if !req.view.areas {
+        let (document, view) = flat::projection(&req.document, &req.view);
+        let moved = move_entity(&MoveRequest {
+            document,
+            view,
+            entity: req.entity.clone(),
+            position: req.position,
+            dragging: req.dragging,
+        })?;
+        let mut out = req.view.clone();
+        out.flat_positions = moved.positions;
         return Ok(out);
     }
     let doc = &req.document;
@@ -3207,6 +3302,12 @@ pub fn preview_layout(req: &LayoutRequest) -> Result<Layout, String> {
     if let Some(result) = focused(req, preview_layout) {
         return result;
     }
+    if let Some(result) = flattened(req, |r, _| preview_body(r)) {
+        return result;
+    }
+    preview_body(req)
+}
+fn preview_body(req: &LayoutRequest) -> Result<Layout, String> {
     let Placement {
         positions, nodes, ..
     } = place(&req.document, &req.view);
@@ -3281,6 +3382,7 @@ pub fn preview_layout(req: &LayoutRequest) -> Result<Layout, String> {
         bundles,
         positions,
         focus_positions: None,
+        flat_positions: None,
     })
 }
 #[wasm_bindgen]

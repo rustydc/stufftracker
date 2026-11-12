@@ -37,6 +37,29 @@ try {
   await page.waitForFunction(() =>
     document.querySelector("#status").textContent.includes("SQLite connected"),
   );
+  // Areas off by default: a flat diagram, no containers, every wire drawn
+  // with right angles only.
+  assert.ok(!(await page.locator("#areas").isChecked()));
+  assert.equal(await page.locator(".node.space").count(), 0);
+  assert.match(
+    await page.locator("#counts").textContent(),
+    /6 visible connections$/,
+  );
+  const diagonal = await page.locator(".route").evaluateAll((ps) =>
+    ps.some((p) => {
+      const pts = p
+        .getAttribute("d")
+        .split(/[ML]/)
+        .filter(Boolean)
+        .map((s) => s.split(",").map(Number));
+      return pts.some(
+        (q, i) => i && q[0] !== pts[i - 1][0] && q[1] !== pts[i - 1][1],
+      );
+    }),
+  );
+  assert.ok(!diagonal, "orthogonal routes");
+  // The rest of these checks are about nested spaces: turn areas on.
+  await page.locator("#areas").check();
   assert.equal(await page.locator(".node").count(), 17);
   const transforms = async () =>
     page
@@ -185,7 +208,12 @@ try {
     await page.request.post(`${base}api/layout`, {
       data: {
         document: snapshot.document,
-        view: { positions: {}, collapsed: [], hidden_layers: [] },
+        view: {
+          positions: {},
+          collapsed: [],
+          hidden_layers: [],
+          areas: true,
+        },
       },
     })
   ).json();
@@ -348,6 +376,8 @@ try {
   );
   await page.locator('.tree-row[data-select="kitchen"]').click();
   await page.locator("#fit").click();
+  // The export below checks nested spaces: draw them before exporting.
+  await page.locator("#areas").check();
   const downloadPromise = page.waitForEvent("download");
   await page.locator("#export").click();
   const download = await downloadPromise;

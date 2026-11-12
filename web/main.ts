@@ -91,6 +91,9 @@ type View = {
   hidden_layers: string[];
   faceplates?: string[];
   focus?: Focus;
+  /** Spaces drawn as containers; off lays everything out flat. */
+  areas?: boolean;
+  flat_positions?: Record<string, Point>;
 };
 type Layout = {
   attachment_hints: Record<string, Point>;
@@ -98,6 +101,7 @@ type Layout = {
   unrouted_connections: string[];
   positions: Record<string, Point>;
   focus_positions?: Record<string, Point>;
+  flat_positions?: Record<string, Point>;
   nodes: {
     id: string;
     position: Point;
@@ -186,6 +190,8 @@ function applyLayout(layout: Layout) {
   // A focus keeps the arrangement it was laid out in (and dragged into).
   if (view.focus && layout.focus_positions)
     view.focus.positions = layout.focus_positions;
+  // Flat (areas off) keeps its own arrangement beside the nested one.
+  else if (layout.flat_positions) view.flat_positions = layout.flat_positions;
 }
 // A trace ("what feeds this", "show only this", a filter) opens as a dialog
 // over what you were looking at; before is that, for Back.
@@ -1022,6 +1028,7 @@ function render() {
     $("counts").classList.remove("error");
     return;
   }
+  $<HTMLInputElement>("areas").checked = !!view.areas;
   layoutGeneration++;
   delete svg.dataset.layoutPending;
   computeLayout();
@@ -3082,4 +3089,10 @@ run(start)();
 $("to-list").onclick = () => {
   mode = "list";
   render();
+};
+$<HTMLInputElement>("areas").onchange = () => {
+  if ($<HTMLInputElement>("areas").checked) view.areas = true;
+  else delete view.areas;
+  render();
+  fit();
 };
