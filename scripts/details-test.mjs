@@ -171,9 +171,14 @@ try {
     document.querySelector("#status").textContent.includes("SQLite connected"),
   );
   await page.locator("#views").selectOption({ label: "Has an IP" });
-  await page.waitForSelector("#focus-bar:not([hidden])");
+  await page.waitForFunction(() =>
+    document.querySelector("#status").textContent.includes("Loaded Has an IP"),
+  );
   assert.deepEqual(await leaves(), ["router"]);
-  await page.locator("#trace-back").click();
+  // A saved view opens without the trace bar; the list leads back.
+  assert.ok(await page.locator("#focus-bar").isHidden());
+  await page.locator("#to-list").click();
+  await page.locator('[data-list="everything"]').click();
   // The inventory search can put its matches on the canvas.
   await page.locator("#search").fill("192.168");
   await page.locator("#search-show").click();

@@ -128,14 +128,10 @@ try {
     ["router"],
   );
   assert.ok(!(await page.locator("#list").isVisible()));
-  // The bar always has a way back; Keep/Add appear only once it shows
-  // something besides the checks (here, after widening the hops).
-  assert.equal(await page.locator("#trace-back").textContent(), "☰ List");
-  assert.equal(await page.locator("#trace-keep").count(), 0);
-  await page.locator('#focus-bar [data-hops="1"]').click();
-  await page.waitForSelector("#trace-keep");
+  // A diagram of the checks opens without the trace bar.
+  assert.ok(await page.locator("#focus-bar").isHidden());
   // Back to the list: checks and query are still there.
-  await page.locator("#trace-back").click();
+  await page.locator("#to-list").click();
   assert.ok(await page.locator("#list").isVisible());
   assert.match(await count(), / · 1 checked/);
   assert.equal(
@@ -168,6 +164,7 @@ try {
       n.filter((x) => !x.classList.contains("space")).map((x) => x.dataset.id),
     );
   assert.deepEqual(kept.sort(), traced.sort(), "the same things stay shown");
+  assert.ok(await page.locator("#focus-bar").isHidden(), "the bar closes");
   await page.locator("#to-list").click();
   assert.match(await count(), new RegExp(` · ${traced.length} checked`));
   // From a diagram: a trace, then Keep replaces the checks with its things.

@@ -916,9 +916,12 @@ function renderFilterPanel() {
 }
 function renderBars() {
   if (mode === "list" || !current) return;
-  const f = view.focus;
+  // The bar is the trace's dialog: a diagram of the checks or a saved view
+  // opens without one (the toolbar's List goes back).
+  const f = traceOpen ? view.focus : undefined;
   const bar = $("focus-bar");
   bar.hidden = !f;
+  if (!f) bar.innerHTML = "";
   if (f) {
     const names = f.entities.map(nameOf);
     const what = [
@@ -2976,14 +2979,10 @@ $("views").onchange = () => {
     (v) => v.id === $<HTMLSelectElement>("views").value,
   );
   if (v) {
-    // A view with a focus opens like a trace: Back returns to where you were.
-    const was = traceOpen
-      ? before
-      : { mode, ...(view.focus ? { focus: structuredClone(view.focus) } : {}) };
     view = structuredClone(v.view);
     mode = "diagram";
-    traceOpen = !!view.focus;
-    before = traceOpen ? was : null;
+    traceOpen = false;
+    before = null;
     render();
     fit();
     status(`Loaded ${v.name}`);
