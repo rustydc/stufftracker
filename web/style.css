@@ -1771,3 +1771,16 @@ label.toggle {
 .list-mode .areas-toggle {
   display: none;
 }
+/* A run of empty panel spaces, folded to a strip. */
+.node.faceplate .slot.gap rect {
+  fill: none;
+  stroke: #cdd6cb;
+  stroke-dasharray: 3 3;
+}
+.node.faceplate .slot.gap text {
+  font-size: 8px;
+  fill: #8b998a;
+  text-anchor: middle;
+  dominant-baseline: central;
+  letter-spacing: 0.4px;
+}

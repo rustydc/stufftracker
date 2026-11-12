@@ -430,6 +430,10 @@ pub struct FaceplateLayout {
     /// Row collecting this thing's connections with no port assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unassigned: Option<PortBox>,
+    /// Runs of empty panel rows folded into one slim strip each; `position`
+    /// is the spaces covered ("23–36").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<PortBox>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortBox {
@@ -792,6 +796,7 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
     };
     let mut ports = Vec::new();
     let mut empty = Vec::new();
+    let mut gaps = Vec::new();
     // A switch with more than 8 ports reads like its front panel: odd
     // ports down the left, even down the right (single-width ports only).
     let paired = kind == Faceplate::Switch
@@ -893,6 +898,73 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
                 rows = rows.max(row_of(space) + 1.);
             }
         }
+        // Fold each run of two or more wholly empty rows into a slim strip,
+        // moving everything below it up.
+        const GAP_HEIGHT: f64 = 16.;
+        let row_count = (last + (last % 2)).div_ceil(2) as usize;
+        let full: BTreeSet<usize> = used.iter().map(|s| ((s - 1) / 2) as usize).collect();
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut r = 0;
+        while r < row_count {
+            if full.contains(&r) {
+                r += 1;
+                continue;
+            }
+            let start = r;
+            while r < row_count && !full.contains(&r) {
+                r += 1;
+            }
+            if r - start >= 2 {
+                runs.push((start, r));
+            }
+        }
+        if !runs.is_empty() {
+            let saved = |run: &(usize, usize)| (run.1 - run.0) as f64 * FACE_ROW - GAP_HEIGHT;
+            // A space row's shift up, or None where it's folded away.
+            let shift = |row: usize| -> Option<f64> {
+                let mut up = 0.;
+                for run in &runs {
+                    if row >= run.0 && row < run.1 {
+                        return None;
+                    }
+                    if row >= run.1 {
+                        up += saved(run);
+                    }
+                }
+                Some(up)
+            };
+            let row_at = |y: f64| ((y - FACE_HEADER) / FACE_ROW + 1e-6).floor() - top;
+            for b in &mut ports {
+                let row = row_at(b.y);
+                if row >= 0. {
+                    b.y -= shift(row as usize).unwrap_or(0.);
+                }
+            }
+            empty.retain_mut(|b| {
+                let row = row_at(b.y);
+                if row < 0. {
+                    return true;
+                }
+                match shift(row as usize) {
+                    Some(up) => {
+                        b.y -= up;
+                        true
+                    }
+                    None => false,
+                }
+            });
+            for run in &runs {
+                let before: f64 = runs.iter().take_while(|o| o.1 <= run.0).map(&saved).sum();
+                let (first, end) = (2 * run.0 + 1, 2 * run.1);
+                let mut b = row_box(10., top + run.0 as f64, 1., width - 20., Side::Either);
+                b.y -= before;
+                b.height = GAP_HEIGHT - 4.;
+                b.position = format!("{first}–{end}");
+                b.label = format!("{} empty spaces", end + 1 - first);
+                gaps.push(b);
+            }
+            rows -= runs.iter().map(&saved).sum::<f64>() / FACE_ROW;
+        }
     } else if paired {
         let col = (width - 30.) / 2.;
         let place = |at: u32| {
@@ -981,6 +1053,7 @@ fn faceplate_layout(e: &Entity, unassigned: bool) -> (Size, FaceplateLayout) {
             ports,
             empty,
             unassigned,
+            gaps,
         },
     )
 }

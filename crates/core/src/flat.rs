@@ -129,13 +129,18 @@ pub(crate) fn projection(doc: &Document, view: &View) -> (Document, View) {
             missing.iter().map(|id| (id.clone(), area_of(id))).collect();
         // Where a wire meets a faceplate: its port's row (or the
         // unassigned row); other things meet wires at their middle.
-        let attach = |id: &str, port: Option<&str>| -> Option<f64> {
+        let attach = |id: &str, port: Option<&str>| -> Option<(f64, i8)> {
             let (_, f) = faces.get(id)?;
             let b = match port {
                 Some(p) => f.ports.iter().find(|b| b.id == p && b.segment == 0),
                 None => f.unassigned.as_ref(),
             }?;
-            Some(b.y + b.height / 2.)
+            let side = match b.side {
+                Side::Left => -1,
+                Side::Right => 1,
+                Side::Either => 0,
+            };
+            Some((b.y + b.height / 2., side))
         };
         let placed = arrange(&projected, &missing, &positions, &sizes, &areas, &attach);
         positions.extend(placed);
@@ -156,7 +161,7 @@ fn arrange(
     placed: &BTreeMap<String, Point>,
     sizes: &BTreeMap<String, Size>,
     areas: &BTreeMap<String, String>,
-    attach: &dyn Fn(&str, Option<&str>) -> Option<f64>,
+    attach: &dyn Fn(&str, Option<&str>) -> Option<(f64, i8)>,
 ) -> BTreeMap<String, Point> {
     let index: BTreeMap<&str, usize> = ids
         .iter()
@@ -164,7 +169,9 @@ fn arrange(
         .map(|(i, id)| (id.as_str(), i))
         .collect();
     let n = ids.len();
-    let mut out_edges: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    // Edges by flow, each marked when it leaves its source by a faceplate's
+    // left column: what it feeds then goes to the left.
+    let mut out_edges: Vec<BTreeMap<usize, bool>> = vec![BTreeMap::new(); n];
     let mut neighbours: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
     // Per thing: (neighbour, where the wire meets this thing, where it meets
     // the neighbour), as offsets from each top (a faceplate port's row).
@@ -205,36 +212,39 @@ fn arrange(
         }
         for (a, b) in pairs {
             if a != b {
-                out_edges[a].insert(b);
+                let left = port_of(a).is_some_and(|(_, side)| side < 0);
+                let edge = out_edges[a].entry(b).or_insert(left);
+                *edge = *edge && left;
                 neighbours[a].insert(b);
                 neighbours[b].insert(a);
-                adj[a].push((b, port_of(a), port_of(b)));
-                adj[b].push((a, port_of(b), port_of(a)));
+                let y = |p: Option<(f64, i8)>| p.map(|(y, _)| y);
+                adj[a].push((b, y(port_of(a)), y(port_of(b))));
+                adj[b].push((a, y(port_of(b)), y(port_of(a))));
             }
         }
     }
     // Break cycles: drop edges that close a loop in a depth-first walk.
     let mut state = vec![0u8; n];
-    let mut dag: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    let mut dag: Vec<BTreeMap<usize, bool>> = vec![BTreeMap::new(); n];
     for start in 0..n {
         if state[start] != 0 {
             continue;
         }
         let mut stack: Vec<(usize, Vec<usize>)> =
-            vec![(start, out_edges[start].iter().copied().collect())];
+            vec![(start, out_edges[start].keys().copied().collect())];
         state[start] = 1;
         while let Some((v, rest)) = stack.last_mut() {
             let v = *v;
             if let Some(w) = rest.pop() {
                 match state[w] {
                     0 => {
-                        dag[v].insert(w);
+                        dag[v].insert(w, out_edges[v][&w]);
                         state[w] = 1;
-                        let next = out_edges[w].iter().copied().collect();
+                        let next = out_edges[w].keys().copied().collect();
                         stack.push((w, next));
                     }
                     2 => {
-                        dag[v].insert(w);
+                        dag[v].insert(w, out_edges[v][&w]);
                     }
                     _ => {} // back edge: a cycle; leave it out of the ranking
                 }
@@ -244,39 +254,58 @@ fn arrange(
             }
         }
     }
-    // Longest-path ranks, then pull pure sources up next to what they feed.
+    // Ranks (columns) by longest path. Flow runs rightwards, except that
+    // a wire leaving a left-column breaker runs leftwards, and so does
+    // everything downstream of it: a panel feeds out to both its sides.
     let mut indegree = vec![0usize; n];
+    let mut preds: Vec<Vec<(usize, bool)>> = vec![Vec::new(); n];
     for v in 0..n {
-        for w in &dag[v] {
+        for (w, left) in &dag[v] {
             indegree[*w] += 1;
+            preds[*w].push((v, *left));
         }
     }
-    let mut rank = vec![0usize; n];
+    let mut rank = vec![0i64; n];
+    let mut flow = vec![1i64; n];
+    let step = |v: usize, left: bool, flow: &Vec<i64>| if left { -flow[v] } else { flow[v] };
     let mut queue: Vec<usize> = (0..n).filter(|v| indegree[*v] == 0).collect();
     let mut order = Vec::new();
     while let Some(v) = queue.pop() {
         order.push(v);
-        for w in dag[v].clone() {
-            rank[w] = rank[w].max(rank[v] + 1);
+        if !preds[v].is_empty() {
+            let rightwards: Vec<i64> = preds[v]
+                .iter()
+                .filter(|(s, left)| step(*s, *left, &flow) > 0)
+                .map(|(s, _)| rank[*s] + 1)
+                .collect();
+            if let Some(r) = rightwards.iter().max() {
+                rank[v] = *r;
+                flow[v] = 1;
+            } else {
+                rank[v] = preds[v].iter().map(|(s, _)| rank[*s] - 1).min().unwrap();
+                flow[v] = -1;
+            }
+        }
+        for w in dag[v].keys().copied().collect::<Vec<_>>() {
             indegree[w] -= 1;
             if indegree[w] == 0 {
                 queue.push(w);
             }
         }
     }
-    let has_pred: Vec<bool> = {
-        let mut p = vec![false; n];
-        for v in 0..n {
-            for w in &dag[v] {
-                p[*w] = true;
-            }
-        }
-        p
-    };
+    // A pure source sits right next to what it feeds, on the side it feeds.
     for v in order.iter().rev() {
-        if !has_pred[*v] && !dag[*v].is_empty() {
-            let nearest = dag[*v].iter().map(|w| rank[*w]).min().unwrap();
-            rank[*v] = nearest.saturating_sub(1).max(rank[*v]);
+        if !preds[*v].is_empty() || dag[*v].is_empty() {
+            continue;
+        }
+        let steps: Vec<i64> = dag[*v]
+            .iter()
+            .map(|(_, left)| step(*v, *left, &flow))
+            .collect();
+        if steps.iter().all(|d| *d > 0) {
+            rank[*v] = dag[*v].keys().map(|w| rank[*w]).min().unwrap() - 1;
+        } else if steps.iter().all(|d| *d < 0) {
+            rank[*v] = dag[*v].keys().map(|w| rank[*w]).max().unwrap() + 1;
         }
     }
     // Weakly connected groups; things with no connection go in the grid.
@@ -324,12 +353,12 @@ fn arrange(
     let mut widest = 0f64;
     for members in &groups {
         let base = members.iter().map(|v| rank[*v]).min().unwrap();
-        let depth = members.iter().map(|v| rank[*v] - base).max().unwrap() + 1;
+        let depth = members.iter().map(|v| rank[*v] - base).max().unwrap() as usize + 1;
         let mut layers: Vec<Vec<usize>> = vec![Vec::new(); depth];
         let mut sorted = members.clone();
         sorted.sort_by_key(|v| sort_name(*v));
         for v in sorted {
-            layers[rank[v] - base].push(v);
+            layers[(rank[v] - base) as usize].push(v);
         }
         let offset = |v: usize, off: Option<f64>| off.unwrap_or(size(v).height / 2.);
         // Where along a neighbour a wire meets it, as a fraction of a slot:
@@ -337,7 +366,8 @@ fn arrange(
         let frac = |w: usize, off: Option<f64>| {
             (offset(w, off) / size(w).height).clamp(0., 1.) * 0.8 - 0.4
         };
-        let in_layer = |w: usize, r: usize| group[w] == group[members[0]] && rank[w] - base == r;
+        let in_layer =
+            |w: usize, r: usize| group[w] == group[members[0]] && rank[w] - base == r as i64;
         // Barycentre sweeps: each column ordered by where its neighbours sit.
         let mut slot = vec![0f64; n];
         let reslot = |layers: &Vec<Vec<usize>>, slot: &mut Vec<f64>| {
@@ -1859,6 +1889,100 @@ mod tests {
             let (c, d) = (y(&ids[8 - k]), y(&ids[7 - k]));
             assert_eq!(a < b, c < d, "column orders agree");
         }
+    }
+
+    fn port(id: &str, at: u32) -> Port {
+        serde_json::from_value(serde_json::json!({ "id": id, "position": at })).unwrap()
+    }
+
+    #[test]
+    fn empty_panel_rows_fold_into_a_strip() {
+        let mut doc = sample();
+        let panel = doc.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        panel.faceplate = Some(Faceplate::Panel);
+        panel.ports = vec![port("1", 1), port("30", 30)];
+        for c in &mut doc.connections {
+            for ep in &mut c.endpoints {
+                ep.port = None;
+            }
+        }
+        let panel = doc.entities.iter().find(|e| e.id == "panel").unwrap();
+        let (size, face) = faceplate_layout(panel, false);
+        // Rows 2..14 (spaces 3–28) hold nothing: one strip instead.
+        assert_eq!(face.gaps.len(), 1);
+        assert_eq!(face.gaps[0].position, "3–28");
+        let gap = &face.gaps[0];
+        let thirty = face.ports.iter().find(|b| b.id == "30").unwrap();
+        assert!(
+            thirty.y > gap.y && thirty.y < gap.y + 40.,
+            "30 sits just below the strip"
+        );
+        assert!(
+            size.height < FACE_HEADER + 6. * FACE_ROW,
+            "compact: {}",
+            size.height
+        );
+        // Space 2 (beside 1) and 29 (beside 30) remain as empty slots.
+        let empties: Vec<&str> = face.empty.iter().map(|b| b.position.as_str()).collect();
+        assert_eq!(empties, ["2", "29"]);
+    }
+
+    #[test]
+    fn a_left_breaker_feeds_to_the_left() {
+        let mut doc = sample();
+        let others: Vec<String> = doc
+            .entities
+            .iter()
+            .filter(|e| e.kind != "space" && e.id != "panel")
+            .take(3)
+            .map(|e| e.id.clone())
+            .collect();
+        let panel = doc.entities.iter_mut().find(|e| e.id == "panel").unwrap();
+        panel.faceplate = Some(Faceplate::Panel);
+        panel.ports = vec![port("1", 1), port("2", 2)];
+        let layer = doc.layers[0].id.clone();
+        let edge = |id: &str, a: &str, port: Option<&str>, b: &str| Connection {
+            id: id.into(),
+            name: id.into(),
+            layer: layer.clone(),
+            endpoints: vec![
+                Endpoint {
+                    entity: a.into(),
+                    role: Role::Source,
+                    port: port.map(str::to_string),
+                },
+                Endpoint {
+                    entity: b.into(),
+                    role: Role::Target,
+                    port: None,
+                },
+            ],
+            properties: Vec::new(),
+        };
+        doc.connections = vec![
+            edge("left", "panel", Some("1"), &others[0]),
+            edge("further", &others[0], None, &others[1]),
+            edge("right", "panel", Some("2"), &others[2]),
+        ];
+        let mut view = flat_view();
+        view.faceplates.insert("panel".into());
+        let l = layout(&LayoutRequest {
+            document: doc,
+            view,
+        })
+        .unwrap();
+        let x = |id: &str| l.nodes.iter().find(|n| n.id == id).unwrap().position.x;
+        assert!(
+            x(&others[0]) < x("panel"),
+            "space 1's load is on the panel's left"
+        );
+        assert!(
+            x(&others[1]) < x(&others[0]),
+            "and what it feeds, further left"
+        );
+        assert!(x(&others[2]) > x("panel"), "space 2's load is on the right");
+        let (bends, _, _) = check(&l);
+        assert!(bends <= 2, "no wraparounds: {bends} bends");
     }
 
     /// `REAL_DOC=path cargo test -p stufftracker-core real_document -- --ignored --nocapture`

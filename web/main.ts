@@ -116,6 +116,8 @@ type Layout = {
       ports: PortBox[];
       empty: PortBox[];
       unassigned?: PortBox;
+      /** Runs of empty panel rows, folded to a strip each ("23–36"). */
+      gaps?: PortBox[];
     };
   }[];
   bundles: {
@@ -1250,6 +1252,8 @@ function faceplateSvg(n: Layout["nodes"][number], e: Entity) {
     ties = "";
   for (const b of f.empty)
     body += slot(b, "empty", `Space ${b.position}: empty`);
+  for (const b of f.gaps || [])
+    body += `<g class="slot gap"><rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" rx="3"/><text x="${b.x + b.width / 2}" y="${b.y + b.height / 2}">⋯ spaces ${esc(b.position)} empty ⋯</text><title>${esc(b.label)}: spaces ${esc(b.position)}</title></g>`;
   for (const b of f.ports) {
     if (b.segment) {
       // A linked breaker's later space: tie its handle to the first one's,
